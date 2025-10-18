@@ -1,0 +1,18 @@
+{
+  "availableMessagesPath": "../it-gateway/config/availableMessages.json",
+  "solar": {
+    "latitudeDegrees": -33.4489,
+    "longitudeDegrees": -70.6693,
+    "clearnessFactor": 0.7,
+    "logIntervalSeconds": 2,
+    "enabled": false,
+    "noiseStdDev": 0.05
+  },
+  "messageLogging": {
+    "enabled": true
+  },
+  "displacementSimulation": {
+    "enabled": true,
+    "timeIntervalMs": 4000
+  }
+}
