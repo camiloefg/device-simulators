@@ -31,6 +31,7 @@ from solar_simulator import SolarConfig, SolarIrradianceSimulator
 GREEN = "\033[92m"
 PINK = "\033[95m"
 BLUE = "\033[94m"
+PURPLE = "\033[35m"
 RESET = "\033[0m"
 BAUD_RATE = 9600
 SYNC_TIMEOUT = 1.0
@@ -38,6 +39,7 @@ DEFAULT_RESPONSE_DELAY = 3.0
 DEFAULT_SEND_TIMEOUT = 1.0
 WRITE_ACTION_KEY = "write-ctrl-mac-address"
 ACK_RESPONSE_KEY = "mac-succesfully-written"
+ACK_KEY = ACK_RESPONSE_KEY
 TYPE_CODE_BY_TYPE = {
     "SMD": 0x01,
     "SST": 0x02,
@@ -170,6 +172,143 @@ def load_available_messages(project_root: Path, config: Dict[str, Any]) -> Dict[
     path = resolve_existing_path(candidates)
     with path.open("r", encoding="utf-8") as fh:
         return json.load(fh)
+
+
+latest_displacement_status: Dict[str, Dict[str, Any]] = {}
+
+
+def update_displacement_status(mac: str, status_key: Optional[str], status_value: Optional[int], action_key: Optional[str] = None) -> None:
+    if status_value is None:
+        return
+    latest_displacement_status[mac] = {
+        "key": status_key,
+        "value": status_value,
+        "action": action_key,
+    }
+
+
+def get_displacement_status(mac: str) -> Optional[Dict[str, Any]]:
+    return latest_displacement_status.get(mac)
+
+
+def initialise_status_for_robot(robot: Robot, available_messages: Dict[str, Any]) -> None:
+    rep_robot = get_response_root(available_messages, robot.type)
+    statuses_section = rep_robot.get("statuses", {})
+    stand_by_entry = statuses_section.get("stand-by")
+    value = extract_rep_value(stand_by_entry)
+    if value is not None:
+        update_displacement_status(robot.mac, "stand-by", int(value, 16), "none")
+
+
+def initialise_robot_statuses(robots: Iterable[Robot], available_messages: Dict[str, Any]) -> None:
+    latest_displacement_status.clear()
+    for robot in robots:
+        try:
+            initialise_status_for_robot(robot, available_messages)
+        except Exception:
+            continue
+
+
+def load_response_sequences(project_root: Path, config: Dict[str, Any]) -> Dict[str, Any]:
+    path_override = config.get("responseSequencesPath")
+    if isinstance(path_override, str) and path_override.strip():
+        override_path = Path(path_override)
+        if not override_path.is_absolute():
+            override_path = (project_root / override_path).resolve()
+        if override_path.is_file():
+            logging.info("Using response sequences from config override: %s", override_path)
+            with override_path.open("r", encoding="utf-8") as fh:
+                return json.load(fh)
+        logging.warning(
+            "Configured response sequences path %s not found; falling back to defaults",
+            override_path,
+        )
+
+    candidates = [
+        project_root / "config" / "response_sequences.json",
+    ]
+    path = resolve_existing_path(candidates)
+    with path.open("r", encoding="utf-8") as fh:
+        return json.load(fh)
+
+
+def get_rep_sections(available_messages: Dict[str, Any], robot_type: str) -> tuple[Dict[str, Any], Dict[str, Any], Dict[str, Any]]:
+    rep_root = get_response_root(available_messages, robot_type) or {}
+    actions_section = rep_root.get("actions", {}) or {}
+    statuses_section = rep_root.get("statuses", {}) or {}
+    return rep_root, actions_section, statuses_section
+
+
+def parse_status_section(statuses_section: Dict[str, Any]) -> tuple[Optional[int], Dict[str, Dict[str, Any]]]:
+    header_hex = extract_rep_value(statuses_section.get("value"))
+    header = int(header_hex, 16) if header_hex else None
+    entries: Dict[str, Dict[str, Any]] = {}
+    for key, descriptor in statuses_section.items():
+        if key == "value":
+            continue
+        value_hex = extract_rep_value(descriptor)
+        if not value_hex:
+            continue
+        entries[key] = {
+            "key": key,
+            "value": int(value_hex, 16),
+            "descriptor": descriptor,
+            "color": descriptor.get("color") if isinstance(descriptor, dict) else None,
+            "blinking": bool(descriptor.get("blinking")) if isinstance(descriptor, dict) else False,
+        }
+    return header, entries
+
+
+def parse_action_section(actions_section: Dict[str, Any]) -> tuple[Optional[int], Dict[str, Dict[str, Any]]]:
+    header_hex = extract_rep_value(actions_section.get("value"))
+    header = int(header_hex, 16) if header_hex else None
+    entries: Dict[str, Dict[str, Any]] = {}
+    for key, descriptor in actions_section.items():
+        if key == "value":
+            continue
+        value_hex = extract_rep_value(descriptor)
+        if not value_hex:
+            continue
+        entries[key] = {
+            "key": key,
+            "value": int(value_hex, 16),
+            "descriptor": descriptor,
+            "color": descriptor.get("color") if isinstance(descriptor, dict) else None,
+            "blinking": bool(descriptor.get("blinking")) if isinstance(descriptor, dict) else False,
+        }
+    return header, entries
+
+
+def format_label(key: Optional[str]) -> str:
+    if not key:
+        return ''
+    return str(key).replace('-', ' ').replace('_', ' ').title()
+
+
+def get_rep_entry(rep_section: Dict[str, Any], key: str) -> Optional[Any]:
+    if not isinstance(rep_section, dict):
+        return None
+    for group_name in ("actions", "statuses", "communication", "communication:", "data"):
+        group = rep_section.get(group_name)
+        if isinstance(group, dict) and key in group:
+            return group[key]
+    return rep_section.get(key)
+
+
+def iter_rep_entries(rep_section: Dict[str, Any]):
+    if not isinstance(rep_section, dict):
+        return
+    for group_name in ("actions", "statuses", "communication", "communication:", "data"):
+        group = rep_section.get(group_name)
+        if isinstance(group, dict):
+            for key, value in group.items():
+                if key == "value":
+                    continue
+                yield key, value
+    for key, value in rep_section.items():
+        if key in {"actions", "statuses", "communication", "data"}:
+            continue
+        yield key, value
 
 
 def load_robots(project_root: Path) -> List[Robot]:
@@ -337,36 +476,115 @@ def start_solar_logger(
     return thread
 
 
-def build_request_lookup(available_messages: Dict[str, Dict[str, Dict[str, str]]]) -> Dict[str, Dict[str, List[str]]]:
+def extract_req_value(entry: Any) -> Optional[str]:
+    if isinstance(entry, dict):
+        value = entry.get("value")
+        if isinstance(value, str) and value.strip():
+            return value.strip().upper()
+        return None
+    if isinstance(entry, str) and entry.strip():
+        return entry.strip().upper()
+    return None
+
+
+def get_request_entries(available_messages: Dict[str, Any], robot_type: str) -> Dict[str, Any]:
     req_section = available_messages.get("REQ", {})
+    type_section = req_section.get(robot_type, {})
+    if not isinstance(type_section, dict) and isinstance(robot_type, str):
+        type_section = req_section.get(robot_type.upper(), {})
+    entries: Dict[str, Any] = {}
+    if not isinstance(type_section, dict):
+        return entries
+    for group_key in ("actions", "data"):
+        group = type_section.get(group_key)
+        if isinstance(group, dict):
+            entries.update(group)
+    for key, value in type_section.items():
+        if key in ("actions", "data"):
+            continue
+        if isinstance(value, (dict, str)):
+            entries[key] = value
+    return entries
+
+
+def build_request_lookup(available_messages: Dict[str, Dict[str, Dict[str, str]]]) -> Dict[str, Dict[str, List[str]]]:
     lookup: Dict[str, Dict[str, List[str]]] = {}
-    for robot_type, mapping in req_section.items():
+    req_section = available_messages.get("REQ", {})
+    for robot_type in req_section.keys():
         norm_type = robot_type.upper()
         per_type: Dict[str, List[str]] = {}
-        for name, code in mapping.items():
-            hex_code = code.upper()
-            per_type.setdefault(hex_code, []).append(name)
+        entries = get_request_entries(available_messages, robot_type)
+        for name, descriptor in entries.items():
+            code = extract_req_value(descriptor)
+            if not code:
+                continue
+            per_type.setdefault(code, []).append(name)
         lookup[norm_type] = per_type
     return lookup
 
 
+def extract_rep_value(entry: Any) -> Optional[str]:
+    if isinstance(entry, dict):
+        value = entry.get("value")
+        if isinstance(value, str) and value.strip():
+            return value.strip().upper()
+        return None
+    if isinstance(entry, str) and entry.strip():
+        return entry.strip().upper()
+    return None
+
+
+def get_response_containers(available_messages: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+    containers: Dict[str, Dict[str, Any]] = {}
+    if not isinstance(available_messages, dict):
+        return containers
+    for top_key in ("RES", "REP"):
+        section = available_messages.get(top_key)
+        if not isinstance(section, dict):
+            continue
+        for robot_key, content in section.items():
+            robot_upper = robot_key.upper() if isinstance(robot_key, str) else robot_key
+            if robot_upper not in containers or not containers[robot_upper]:
+                containers[robot_upper] = content or {}
+    return containers
+
+
+def get_response_root(available_messages: Dict[str, Any], robot_type: str) -> Dict[str, Any]:
+    if not robot_type:
+        return {}
+    containers = get_response_containers(available_messages)
+    return containers.get(robot_type.upper(), {}) or {}
+
+
 def build_response_sequences(
-    available_messages: Dict[str, Dict[str, Dict[str, str]]]
+    available_messages: Dict[str, Dict[str, Dict[str, str]]],
+    sequences_payload: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Dict[str, Sequence[str]]]:
     req_section = available_messages.get("REQ", {})
-    rep_section = available_messages.get("REP", {})
-    sequences_section = (
-        available_messages.get("RESPONSE_SEQUENCES")
-        or available_messages.get("REP_SEQUENCES")
-        or {}
-    )
+    response_map = get_response_containers(available_messages)
+    sequences_section: Dict[str, Dict[str, Sequence[str]]]
+
+    sequences_candidates = [
+        sequences_payload,
+        sequences_payload.get("response_sequences") if isinstance(sequences_payload, dict) else None,
+        sequences_payload.get("RESPONSE_SEQUENCES") if isinstance(sequences_payload, dict) else None,
+        available_messages.get("response_sequences"),
+        available_messages.get("RESPONSE_SEQUENCES"),
+        available_messages.get("REP_SEQUENCES"),
+    ]
+    for candidate in sequences_candidates:
+        if isinstance(candidate, dict) and candidate:
+            sequences_section = candidate
+            break
+    else:
+        sequences_section = {}
 
     sequences: Dict[str, Dict[str, Sequence[str]]] = {}
 
     for robot_type, per_robot in sequences_section.items():
         robot_type_upper = robot_type.upper()
-        robot_req = req_section.get(robot_type, {})
-        robot_rep = rep_section.get(robot_type, {})
+        robot_req = get_request_entries(available_messages, robot_type)
+        robot_rep = response_map.get(robot_type_upper, {})
         if not robot_req or not robot_rep:
             logging.warning(
                 "Skipping response sequences for %s; REQ/REP definitions missing in availableMessages",
@@ -376,7 +594,8 @@ def build_response_sequences(
 
         result: Dict[str, Sequence[str]] = {}
         for req_key, rep_keys in per_robot.items():
-            if req_key not in robot_req:
+            descriptor = robot_req.get(req_key)
+            if descriptor is None:
                 logging.warning(
                     "Request key '%s' for type %s not present in availableMessages REQ section",
                     req_key,
@@ -392,7 +611,9 @@ def build_response_sequences(
             valid_rep_keys = []
             missing_rep_keys = []
             for rep_key in rep_keys_iterable:
-                if rep_key in robot_rep:
+                descriptor_entry = get_rep_entry(robot_rep, rep_key)
+                rep_value = extract_rep_value(descriptor_entry)
+                if rep_value:
                     valid_rep_keys.append(rep_key)
                 else:
                     missing_rep_keys.append(rep_key)
@@ -408,12 +629,120 @@ def build_response_sequences(
             if not valid_rep_keys:
                 continue
 
-            code = robot_req[req_key].upper()
-            result[code] = tuple(valid_rep_keys)
+            code_value = extract_req_value(descriptor)
+            if not code_value:
+                logging.warning(
+                    "Request key '%s' for type %s lacks a valid value in availableMessages",
+                    req_key,
+                    robot_type,
+                )
+                continue
+            result[code_value] = tuple(valid_rep_keys)
 
         sequences[robot_type_upper] = result
 
     return sequences
+
+
+def build_displacement_frames(
+    robot_type: str,
+    action_keys: Optional[Sequence[str]],
+    available_messages: Dict[str, Dict[str, Dict[str, str]]],
+) -> List[Dict[str, Any]]:
+    _, actions_section, statuses_section = get_rep_sections(available_messages, robot_type)
+    actions_header_hex, action_entries = parse_action_section(actions_section)
+    statuses_header_hex, status_entries = parse_status_section(statuses_section)
+
+    if actions_header_hex is None or not action_entries or 'none' not in action_entries:
+        return []
+    if 'working' not in status_entries or 'stand-by' not in status_entries:
+        return []
+
+    actions_header = actions_header_hex
+    working_entry = status_entries['working']
+    stand_by_entry = status_entries['stand-by']
+    none_entry = action_entries['none']
+
+    frames: List[Dict[str, Any]] = []
+    sequence_iterable = list(action_keys or [])
+
+    for step in sequence_iterable:
+        action_entry = action_entries.get(step)
+        if not action_entry:
+            continue
+        frames.append({
+            "bytes": [actions_header, working_entry['value'], action_entry['value']],
+            "labels": [
+                f"actions:{format_label(step)}",
+                f"status:{format_label('working')}",
+            ],
+            "status_info": {"key": 'working', "value": working_entry['value']},
+            "action_info": {"key": step, "value": action_entry['value']},
+            "action_label": format_label(step),
+        })
+
+    frames.append({
+        "bytes": [actions_header, stand_by_entry['value'], none_entry['value']],
+        "labels": [
+            f"actions:{format_label('none')}",
+            f"status:{format_label('stand-by')}",
+        ],
+        "status_info": {"key": 'stand-by', "value": stand_by_entry['value']},
+        "action_info": {"key": 'none', "value": none_entry['value']},
+        "action_label": format_label('none'),
+    })
+
+    return frames
+
+
+def build_status_response(
+    robot_type: str,
+    mac: str,
+    available_messages: Dict[str, Dict[str, Dict[str, str]]],
+) -> Optional[Dict[str, Any]]:
+    _, actions_section, statuses_section = get_rep_sections(available_messages, robot_type)
+    status_header_hex, status_entries = parse_status_section(statuses_section)
+    _, action_entries = parse_action_section(actions_section)
+    if status_header_hex is None or not status_entries:
+        return None
+
+    record = get_displacement_status(mac)
+    if not record:
+        default_entry = status_entries.get('stand-by')
+        if not default_entry:
+            return None
+        update_displacement_status(mac, 'stand-by', default_entry['value'], 'none')
+        record = {"key": 'stand-by', "value": default_entry['value'], "action": 'none'}
+
+    key = record.get('key')
+    value = record.get('value')
+    if value is None:
+        return None
+    matching_entry = status_entries.get(key) or next((entry for entry in status_entries.values() if entry['value'] == value), None)
+    label_key = matching_entry['key'] if matching_entry else key or f"0x{value:02X}"
+
+    action_key = record.get('action') or 'none'
+    action_entry = action_entries.get(action_key) if isinstance(action_entries, dict) else None
+    if action_entry is None and isinstance(action_entries, dict):
+        action_entry = action_entries.get('none')
+    action_value = action_entry['value'] if action_entry and 'value' in action_entry else 0
+    normalised_action_key = action_entry['key'] if action_entry and 'key' in action_entry else action_key or 'none'
+    action_label = format_label(normalised_action_key)
+
+    payload_bytes = [status_header_hex, value, action_value]
+    return {
+        "bytes": payload_bytes,
+        "labels": [
+            f"status:{format_label(label_key)}",
+            f"action:{action_label}",
+        ],
+        "status_info": {"key": label_key, "value": value},
+        "action_info": {
+            "key": normalised_action_key,
+            "value": action_value,
+        },
+        "action_label": action_label,
+    }
 
 
 def discover_matches(robots: Iterable[Robot], messages_enabled: bool) -> List[Match]:
@@ -489,10 +818,30 @@ def translate_request(
 def translate_response(
     code: str, robot_type: str, available_messages: Dict[str, Dict[str, Dict[str, str]]]
 ) -> Optional[str]:
-    rep_section = available_messages.get("REP", {}).get(robot_type.upper(), {})
-    for name, hex_value in rep_section.items():
-        if hex_value.upper() == code.upper():
+    rep_section = get_response_root(available_messages, robot_type)
+    for name, entry in iter_rep_entries(rep_section):
+        rep_value = extract_rep_value(entry)
+        if rep_value and rep_value.upper() == code.upper():
             return name
+    return None
+
+
+def translate_response_entry(
+    code: int, robot_type: str, available_messages: Dict[str, Dict[str, Dict[str, str]]]
+) -> Optional[Dict[str, Any]]:
+    rep_section = get_response_root(available_messages, robot_type)
+    for name, entry in iter_rep_entries(rep_section):
+        rep_value = extract_rep_value(entry)
+        if rep_value and int(rep_value, 16) == code:
+            if isinstance(entry, dict) and entry is not None:
+                return {
+                    "status": name,
+                    "descriptor": entry,
+                }
+            return {
+                "status": name,
+                "descriptor": {"value": rep_value},
+            }
     return None
 
 
@@ -502,10 +851,11 @@ def prepare_response_payloads(
     sequences: Dict[str, Dict[str, Sequence[str]]],
     available_messages: Dict[str, Dict[str, Dict[str, str]]],
     messages_enabled: bool,
+    sequence_keys: Optional[Sequence[str]] = None,
 ) -> List[int]:
     robot_type_upper = robot_type.upper()
-    rep_section = available_messages.get("REP", {}).get(robot_type_upper, {})
-    sequence = sequences.get(robot_type_upper, {}).get(request_code.upper())
+    rep_section = get_response_root(available_messages, robot_type)
+    sequence = sequence_keys if sequence_keys is not None else sequences.get(robot_type_upper, {}).get(request_code.upper())
 
     if not sequence:
         if messages_enabled:
@@ -518,7 +868,8 @@ def prepare_response_payloads(
 
     payload: List[int] = []
     for rep_key in sequence:
-        rep_code = rep_section.get(rep_key)
+        descriptor = get_rep_entry(rep_section, rep_key)
+        rep_code = extract_rep_value(descriptor)
         if rep_code is None:
             if messages_enabled:
                 logging.debug("REP key %s missing for %s during payload build", rep_key, robot_type)
@@ -535,8 +886,9 @@ def build_mac_write_ack(
     controller_mac: Optional[str],
 ) -> Optional[List[Dict[str, Any]]]:
     robot_type = match.robot.type.upper()
-    rep_section = available_messages.get("REP", {}).get(robot_type, {})
-    ack_hex = rep_section.get(ACK_RESPONSE_KEY)
+    rep_section = get_response_root(available_messages, robot_type)
+    ack_entry = get_rep_entry(rep_section, ACK_KEY)
+    ack_hex = extract_rep_value(ack_entry)
     if not ack_hex:
         if messages_enabled:
             logging.debug("[%s] No REP code found for %s", match.robot.id, ACK_RESPONSE_KEY)
@@ -656,6 +1008,9 @@ def listen_on_match(
             )
 
         payload_sequences: Optional[List[Dict[str, Any]]] = None
+        sequence_labels: Optional[List[str]] = None
+        sequence_keys = sequences.get(match.robot.type.upper(), {}).get(request_code.upper())
+
         if request_name == WRITE_ACTION_KEY:
             payload_sequences = build_mac_write_ack(
                 match,
@@ -668,58 +1023,77 @@ def listen_on_match(
             if stop_event.wait(response_delay):
                 return
 
-        sequence_labels: Optional[List[str]] = None
         step_delay = response_delay
         if payload_sequences is None:
-            base_payload = prepare_response_payloads(
-                match.robot.type,
-                request_code,
-                sequences,
-                available_messages,
-                messages_enabled,
-            )
-            if not base_payload:
-                if messages_enabled:
-                    logging.info(
-                        "%s[%s] RX %s | no configured response for %s%s",
-                        PINK if highlight_remote else "",
-                        match.robot.id,
-                        frame_hex,
-                        request_code,
-                        RESET if highlight_remote else "",
-                    )
-                return
-            payload_sequences = []
-            sequence_labels = []
-            for value in base_payload:
-                response_code = format(value, "02X")
-                response_name = translate_response(response_code, match.robot.type, available_messages)
-                if response_name:
-                    sequence_labels.append(response_name)
-                else:
-                    sequence_labels.append(f"0x{response_code}")
-                payload_sequences.append(
-                    {
-                        "bytes": [value],
-                        "labels": [response_name or f"0x{response_code}"],
-                    }
+            if request_name in DISPLACEMENT_ACTIONS:
+                payload_sequences = build_displacement_frames(
+                    match.robot.type,
+                    sequence_keys,
+                    available_messages,
                 )
-            if request_name in DISPLACEMENT_ACTIONS and payload_sequences:
-                if displacement_enabled:
+                if not payload_sequences:
+                    return
+                sequence_labels = [
+                    entry.get("action_label")
+                    for entry in payload_sequences
+                    if entry.get("action_label") and entry.get("action_label").lower() != "none"
+                ]
+                if displacement_enabled and sequence_labels:
                     step_delay = max(displacement_interval, 0.0)
                     print(
                         f"{BLUE}[Displacement] TX sequence {sequence_labels}"
                         f" to {remote_address or 'unknown'} (interval {step_delay:.2f}s){RESET}"
                     )
-                else:
+                elif not displacement_enabled:
                     payload_sequences = [payload_sequences[0]]
-                    sequence_labels = [sequence_labels[0]]
+                    sequence_labels = sequence_labels[:1] if sequence_labels else None
                     step_delay = 0.0
-                    print(
-                        f"{BLUE}[Displacement] TX single response {sequence_labels}"
-                        f" to {remote_address or 'unknown'} (simulation disabled){RESET}"
-                    )
-        elif len(payload_sequences) == 0:
+                    if sequence_labels:
+                        print(
+                            f"{BLUE}[Displacement] TX single response {sequence_labels}"
+                            f" to {remote_address or 'unknown'} (simulation disabled){RESET}"
+                        )
+            else:
+                base_payload = prepare_response_payloads(
+                    match.robot.type,
+                    request_code,
+                    sequences,
+                    available_messages,
+                    messages_enabled,
+                    sequence_keys,
+                )
+                payload_sequences = []
+                sequence_labels = []
+                if not base_payload:
+                    if messages_enabled and request_name != 'request-all-data':
+                        logging.info(
+                            "%s[%s] RX %s | no configured response for %s%s",
+                            PINK if highlight_remote else "",
+                            match.robot.id,
+                            frame_hex,
+                            request_code,
+                            RESET if highlight_remote else "",
+                        )
+                    if request_name != 'request-all-data':
+                        return
+                for value in base_payload:
+                    response_code = format(value, "02X")
+                    response_name = translate_response(response_code, match.robot.type, available_messages)
+                    if response_name:
+                        sequence_labels.append(response_name)
+                    else:
+                        sequence_labels.append(f"0x{response_code}")
+                    payload_sequences.append({"bytes": [value], "labels": [response_name or f"0x{response_code}"]})
+
+        if request_name == 'request-all-data':
+            status_frame = build_status_response(match.robot.type, match.robot.mac, available_messages)
+            if status_frame:
+                if payload_sequences:
+                    payload_sequences.insert(0, status_frame)
+                else:
+                    payload_sequences = [status_frame]
+
+        if not payload_sequences:
             if messages_enabled:
                 logging.debug("[%s] Remote write ack produced empty payload", match.robot.id)
             return
@@ -742,6 +1116,9 @@ def listen_on_match(
                 labels = sequence_entry.get("labels")
                 if isinstance(labels, list):
                     labels_list = [str(label) for label in labels]
+            status_info = None
+            if isinstance(sequence_entry, dict):
+                status_info = sequence_entry.get("status_info")
             try:
                 if not target_remote:
                     raise RuntimeError("No remote device available for response")
@@ -755,6 +1132,16 @@ def listen_on_match(
                         response_name = translate_response(response_code, match.robot.type, available_messages)
                         labels_list.append(response_name or f"0x{response_code}")
                 tx_records.append(f"{' '.join(codes)} ({', '.join(labels_list)})")
+                print(
+                    f"{PURPLE}[TX] frame {' '.join(codes)} → {remote_address or 'unknown'} ({', '.join(labels_list)}){RESET}"
+                )
+                if status_info and isinstance(status_info, dict):
+                    update_displacement_status(
+                        match.robot.mac,
+                        status_info.get("key"),
+                        status_info.get("value"),
+                        sequence_entry.get("action_info", {}).get("key") if isinstance(sequence_entry, dict) else None,
+                    )
             except TimeoutException:
                 if messages_enabled:
                     logging.warning("[%s] Timeout sending %s", match.robot.id, sequence)
@@ -781,6 +1168,16 @@ def listen_on_match(
                             response_name = translate_response(response_code, match.robot.type, available_messages)
                             labels_list.append(response_name or f"0x{response_code}")
                     tx_records.append(f"broadcast {' '.join(codes)} ({', '.join(labels_list)})")
+                    print(
+                        f"{PURPLE}[TX] broadcast {' '.join(codes)} → {remote_address or 'unknown'} ({', '.join(labels_list)}){RESET}"
+                    )
+                    if status_info and isinstance(status_info, dict):
+                        update_displacement_status(
+                            match.robot.mac,
+                            status_info.get("key"),
+                            status_info.get("value"),
+                            sequence_entry.get("action_info", {}).get("key") if isinstance(sequence_entry, dict) else None,
+                        )
                 except Exception as broadcast_exc:
                     if messages_enabled:
                         logging.error("[%s] Broadcast fallback failed: %s", match.robot.id, broadcast_exc)
@@ -911,7 +1308,9 @@ def main() -> None:
     try:
         config = load_config(project_root)
         available_messages = load_available_messages(project_root, config)
+        response_sequences = load_response_sequences(project_root, config)
         robots = load_robots(project_root)
+        initialise_robot_statuses(robots, available_messages)
     except FileNotFoundError as exc:
         logging.error("%s", exc)
         return
@@ -932,7 +1331,7 @@ def main() -> None:
         return
 
     request_lookup = build_request_lookup(available_messages)
-    sequences = build_response_sequences(available_messages)
+    sequences = build_response_sequences(available_messages, response_sequences)
 
     stop_event = threading.Event()
     solar_thread = start_solar_logger(solar_simulator, stop_event, solar_interval, solar_logging_enabled)
