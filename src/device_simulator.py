@@ -232,15 +232,33 @@ def load_response_sequences(project_root: Path, config: Dict[str, Any]) -> Dict[
         return json.load(fh)
 
 
-def get_rep_sections(available_messages: Dict[str, Any], robot_type: str) -> tuple[Dict[str, Any], Dict[str, Any], Dict[str, Any]]:
+def get_rep_sections(available_messages: Dict[str, Any], robot_type: str) -> tuple[Dict[str, Any], Dict[str, Any], Dict[str, Any], Dict[str, Any]]:
     rep_root = get_response_root(available_messages, robot_type) or {}
-    actions_section = rep_root.get("actions", {}) or {}
-    statuses_section = rep_root.get("statuses", {}) or {}
-    return rep_root, actions_section, statuses_section
+    data_section = rep_root.get("data", {}) or {}
+    sub_id_section = data_section.get("sub-id") if isinstance(data_section, dict) else {}
+    actions_section = {}
+    statuses_section = {}
+    if isinstance(sub_id_section, dict):
+        actions_section = sub_id_section.get("actions") or {}
+        statuses_section = sub_id_section.get("statuses") or {}
+    if not isinstance(actions_section, dict):
+        actions_section = rep_root.get("actions", {}) or {}
+    if not isinstance(statuses_section, dict):
+        statuses_section = rep_root.get("statuses", {}) or {}
+    return rep_root, actions_section, statuses_section, data_section
 
 
-def parse_status_section(statuses_section: Dict[str, Any]) -> tuple[Optional[int], Dict[str, Dict[str, Any]]]:
-    header_hex = extract_rep_value(statuses_section.get("value"))
+def parse_status_section(
+    statuses_section: Dict[str, Any],
+    data_section: Optional[Dict[str, Any]] = None,
+) -> tuple[Optional[int], Dict[str, Dict[str, Any]]]:
+    header_hex: Optional[str] = None
+    if isinstance(data_section, dict):
+        id_section = data_section.get("id")
+        if isinstance(id_section, dict):
+            header_hex = extract_rep_value(id_section.get("all-data"))
+    if not header_hex:
+        header_hex = extract_rep_value(statuses_section.get("value"))
     header = int(header_hex, 16) if header_hex else None
     entries: Dict[str, Dict[str, Any]] = {}
     for key, descriptor in statuses_section.items():
@@ -259,8 +277,17 @@ def parse_status_section(statuses_section: Dict[str, Any]) -> tuple[Optional[int
     return header, entries
 
 
-def parse_action_section(actions_section: Dict[str, Any]) -> tuple[Optional[int], Dict[str, Dict[str, Any]]]:
-    header_hex = extract_rep_value(actions_section.get("value"))
+def parse_action_section(
+    actions_section: Dict[str, Any],
+    data_section: Optional[Dict[str, Any]] = None,
+) -> tuple[Optional[int], Dict[str, Dict[str, Any]]]:
+    header_hex: Optional[str] = None
+    if isinstance(data_section, dict):
+        id_section = data_section.get("id")
+        if isinstance(id_section, dict):
+            header_hex = extract_rep_value(id_section.get("action-response"))
+    if not header_hex:
+        header_hex = extract_rep_value(actions_section.get("value"))
     header = int(header_hex, 16) if header_hex else None
     entries: Dict[str, Dict[str, Any]] = {}
     for key, descriptor in actions_section.items():
@@ -290,6 +317,18 @@ def get_rep_entry(rep_section: Dict[str, Any], key: str) -> Optional[Any]:
         return None
     for group_name in ("actions", "statuses", "communication", "communication:", "data"):
         group = rep_section.get(group_name)
+        if group_name == "data":
+            if not isinstance(group, dict):
+                continue
+            id_group = group.get("id")
+            if isinstance(id_group, dict) and key in id_group:
+                return id_group[key]
+            sub_id_group = group.get("sub-id")
+            if isinstance(sub_id_group, dict):
+                for nested in sub_id_group.values():
+                    if isinstance(nested, dict) and key in nested:
+                        return nested[key]
+            continue
         if isinstance(group, dict) and key in group:
             return group[key]
     return rep_section.get(key)
@@ -300,11 +339,30 @@ def iter_rep_entries(rep_section: Dict[str, Any]):
         return
     for group_name in ("actions", "statuses", "communication", "communication:", "data"):
         group = rep_section.get(group_name)
-        if isinstance(group, dict):
-            for key, value in group.items():
+        if group_name == "data":
+            if not isinstance(group, dict):
+                continue
+            id_group = group.get("id") if isinstance(group.get("id"), dict) else {}
+            for key, value in id_group.items():
                 if key == "value":
                     continue
                 yield key, value
+            sub_id_group = group.get("sub-id")
+            if isinstance(sub_id_group, dict):
+                for nested in sub_id_group.values():
+                    if not isinstance(nested, dict):
+                        continue
+                    for key, value in nested.items():
+                        if key == "value":
+                            continue
+                        yield key, value
+            continue
+        if not isinstance(group, dict):
+            continue
+        for key, value in group.items():
+            if key == "value":
+                continue
+            yield key, value
     for key, value in rep_section.items():
         if key in {"actions", "statuses", "communication", "data"}:
             continue
@@ -649,9 +707,9 @@ def build_displacement_frames(
     action_keys: Optional[Sequence[str]],
     available_messages: Dict[str, Dict[str, Dict[str, str]]],
 ) -> List[Dict[str, Any]]:
-    _, actions_section, statuses_section = get_rep_sections(available_messages, robot_type)
-    actions_header_hex, action_entries = parse_action_section(actions_section)
-    statuses_header_hex, status_entries = parse_status_section(statuses_section)
+    _, actions_section, statuses_section, data_section = get_rep_sections(available_messages, robot_type)
+    actions_header_hex, action_entries = parse_action_section(actions_section, data_section)
+    statuses_header_hex, status_entries = parse_status_section(statuses_section, data_section)
 
     if actions_header_hex is None or not action_entries or 'none' not in action_entries:
         return []
@@ -700,9 +758,9 @@ def build_status_response(
     mac: str,
     available_messages: Dict[str, Dict[str, Dict[str, str]]],
 ) -> Optional[Dict[str, Any]]:
-    _, actions_section, statuses_section = get_rep_sections(available_messages, robot_type)
-    status_header_hex, status_entries = parse_status_section(statuses_section)
-    _, action_entries = parse_action_section(actions_section)
+    _, actions_section, statuses_section, data_section = get_rep_sections(available_messages, robot_type)
+    status_header_hex, status_entries = parse_status_section(statuses_section, data_section)
+    _, action_entries = parse_action_section(actions_section, data_section)
     if status_header_hex is None or not status_entries:
         return None
 
