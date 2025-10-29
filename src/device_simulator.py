@@ -936,16 +936,21 @@ def build_cycle_report(
             except ValueError:
                 action_value = 0
 
-    cycle_byte = cycles_value & 0xFF
+    # Convert cycles to 4 bytes (32-bit unsigned integer, little-endian)
+    # This allows cycles up to 4,294,967,295 instead of being limited to 255
+    cycle_byte0 = (cycles_value >> 0) & 0xFF   # LSB (least significant byte)
+    cycle_byte1 = (cycles_value >> 8) & 0xFF
+    cycle_byte2 = (cycles_value >> 16) & 0xFF
+    cycle_byte3 = (cycles_value >> 24) & 0xFF  # MSB (most significant byte)
 
     labels = [
-        f"cycles:{cycle_byte}",
+        f"cycles:{cycles_value}",
         f"status:{format_label(status_record.get('key'))}",
         f"action:{format_label(action_key)}",
     ]
 
     return {
-        "bytes": [cycles_header, cycle_byte, status_value, action_value],
+        "bytes": [cycles_header, cycle_byte0, cycle_byte1, cycle_byte2, cycle_byte3, status_value, action_value],
         "labels": labels,
         "status_info": status_record,
         "action_info": {
