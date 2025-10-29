@@ -1234,6 +1234,16 @@ def listen_on_match(
                 controller_mac=remote_address,
             )
 
+        # Handle request-all-data: respond with status frame containing all data (0x3A)
+        if payload_sequences is None and request_name == 'request-all-data':
+            status_frame = build_status_response(match.robot.type, match.robot.mac, available_messages)
+            payload_sequences = []
+            sequence_labels = []
+            if status_frame:
+                payload_sequences.append(status_frame)
+                sequence_labels.append('all-data')
+
+        # Handle robot-cycles and robot-status-and-cycles: respond with cycle frame (0x37)
         if payload_sequences is None and request_name in {'robot-cycles', 'robot-status-and-cycles'}:
             cycle_frame = build_cycle_report(match.robot.type, match.robot.mac, available_messages, messages_enabled)
             status_frame = None
@@ -1315,17 +1325,6 @@ def listen_on_match(
                     else:
                         sequence_labels.append(f"0x{response_code}")
                     payload_sequences.append({"bytes": [value], "labels": [response_name or f"0x{response_code}"]})
-
-        if request_name == 'request-all-data':
-            cycle_frame = build_cycle_report(match.robot.type, match.robot.mac, available_messages, messages_enabled)
-            status_frame = build_status_response(match.robot.type, match.robot.mac, available_messages)
-            if status_frame or cycle_frame:
-                if not payload_sequences:
-                    payload_sequences = []
-                if cycle_frame:
-                    payload_sequences.insert(0, cycle_frame)
-                if status_frame:
-                    payload_sequences.insert(0, status_frame)
 
         mac_upper = match.robot.mac.upper()
         if request_name in DISPLACEMENT_ACTIONS:
