@@ -56,6 +56,11 @@ DISPLACEMENT_ACTIONS = {
     "move-cw-no-brush",
     "move-ccw-no-brush",
 }
+CYCLE_INCREMENT_EXCLUDED_ACTIONS = {
+    "to-start",
+    "back",
+    "back-reverse",
+}
 BROADCAST_ADDRESS = "000000000000FFFF"
 remote_write_registry: Dict[str, Dict[str, Any]] = {}
 ROBOTS_FILE_PATH: Optional[Path] = None
@@ -98,6 +103,7 @@ class Robot:
     type: str
     description: str
     scada_id: str
+    simulated_cycles: int = 0
 
     @classmethod
     def from_dict(cls, payload: Dict[str, str]) -> "Robot":
@@ -107,6 +113,11 @@ class Robot:
             type=payload["type"].upper(),
             description=payload.get("description", ""),
             scada_id=payload.get("scadaId", ""),
+            simulated_cycles=_parse_simulated_cycles(
+                payload.get("simulated-robot-cycles")
+                or payload.get("simulatedRobotCycles")
+                or payload.get("cycles"),
+            ),
         )
 
 
@@ -142,6 +153,28 @@ def _coerce_bool(value: Any, default: bool) -> bool:
     return default
 
 
+def _parse_simulated_cycles(value: Any) -> int:
+    if value is None:
+        return 0
+    if isinstance(value, str):
+        stripped = value.strip()
+        if stripped == "":
+            return 0
+        try:
+            numeric = float(stripped)
+        except ValueError:
+            return 0
+    else:
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            return 0
+    try:
+        return max(0, int(round(numeric)))
+    except (TypeError, ValueError):
+        return 0
+
+
 def load_config(project_root: Path) -> Dict[str, Any]:
     config_path = project_root / "config" / "device_simulator.json"
     if not config_path.is_file():
@@ -175,6 +208,8 @@ def load_available_messages(project_root: Path, config: Dict[str, Any]) -> Dict[
 
 
 latest_displacement_status: Dict[str, Dict[str, Any]] = {}
+simulated_cycles_registry: Dict[str, int] = {}
+previous_displacement_action: Dict[str, str] = {}
 
 
 def update_displacement_status(mac: str, status_key: Optional[str], status_value: Optional[int], action_key: Optional[str] = None) -> None:
@@ -370,11 +405,7 @@ def iter_rep_entries(rep_section: Dict[str, Any]):
 
 
 def load_robots(project_root: Path) -> List[Robot]:
-    workspace_root = project_root.parent
-    candidates = [
-        project_root / "data" / "robots.json",
-        workspace_root / "it-gateway" / "robot-data" / "robots.json",
-    ]
+    candidates = [project_root / "data" / "robots.json"]
     path = resolve_existing_path(candidates)
     global ROBOTS_FILE_PATH
     ROBOTS_FILE_PATH = path
@@ -384,7 +415,9 @@ def load_robots(project_root: Path) -> List[Robot]:
     robots = []
     for payload in robots_payload:
         try:
-            robots.append(Robot.from_dict(payload))
+            robot = Robot.from_dict(payload)
+            robots.append(robot)
+            simulated_cycles_registry[robot.mac] = robot.simulated_cycles
         except KeyError as exc:
             logging.warning("Skipping robot entry missing key %s: %s", exc, payload)
     return robots
@@ -430,6 +463,64 @@ def persist_control_mac(robot_mac: str, controller_mac: str, messages_enabled: b
             fh.write("\n")
     except OSError as error:
         logging.warning("Failed to write robots file for MAC persistence: %s", error)
+
+
+def get_simulated_cycles(mac: str) -> int:
+    return simulated_cycles_registry.get(mac.upper(), 0)
+
+
+def persist_simulated_cycles(robot_mac: str, cycles: int, messages_enabled: bool) -> None:
+    if not ROBOTS_FILE_PATH:
+        if messages_enabled:
+            logging.debug("No robots.json path known; skipping cycles persistence for %s", robot_mac)
+        return
+
+    try:
+        with ROBOTS_FILE_PATH.open("r", encoding="utf-8") as fh:
+            payload = json.load(fh)
+    except (OSError, json.JSONDecodeError) as error:
+        logging.warning("Failed to read robots file for cycles persistence: %s", error)
+        return
+
+    robots = payload.get("robots")
+    if not isinstance(robots, list):
+        logging.warning("Unexpected robots payload while persisting cycles; skipping")
+        return
+
+    target_mac = robot_mac.upper()
+    updated = False
+    for entry in robots:
+        mac = entry.get("mac")
+        if isinstance(mac, str) and mac.upper() == target_mac:
+            if entry.get("simulated-robot-cycles") != cycles:
+                entry["simulated-robot-cycles"] = cycles
+                updated = True
+            break
+    else:
+        if messages_enabled:
+            logging.debug("Robot MAC %s not found in robots.json; skipping cycles persistence", robot_mac)
+
+    if not updated:
+        return
+
+    payload["updatedAt"] = datetime.now(timezone.utc).isoformat()
+    try:
+        with ROBOTS_FILE_PATH.open("w", encoding="utf-8") as fh:
+            json.dump(payload, fh, indent=2)
+            fh.write("\n")
+    except OSError as error:
+        logging.warning("Failed to write robots file for cycles persistence: %s", error)
+
+
+def increment_simulated_cycles(robot: Robot, messages_enabled: bool) -> int:
+    current = get_simulated_cycles(robot.mac)
+    next_value = current + 1
+    simulated_cycles_registry[robot.mac.upper()] = next_value
+    robot.simulated_cycles = next_value
+    persist_simulated_cycles(robot.mac, next_value, messages_enabled)
+    if messages_enabled:
+        logging.info("[Cycles] %s simulated cycles updated to %d", robot.mac, next_value)
+    return next_value
 
 
 def load_solar_config(config: Dict[str, Any]) -> SolarConfig:
@@ -803,6 +894,72 @@ def build_status_response(
     }
 
 
+def build_cycle_report(
+    robot_type: str,
+    mac: str,
+    available_messages: Dict[str, Dict[str, Dict[str, str]]],
+    messages_enabled: bool,
+) -> Optional[Dict[str, Any]]:
+    _, actions_section, statuses_section, data_section = get_rep_sections(available_messages, robot_type)
+    id_section = data_section.get("id") if isinstance(data_section, dict) else {}
+    cycles_entry = id_section.get("cycles") if isinstance(id_section, dict) else None
+    cycles_header_hex = extract_rep_value(cycles_entry)
+    if not cycles_header_hex:
+        return None
+    try:
+        cycles_header = int(cycles_header_hex, 16)
+    except ValueError:
+        return None
+
+    _, status_entries = parse_status_section(statuses_section, data_section)
+    status_record = get_displacement_status(mac)
+    if not status_record:
+        fallback = status_entries.get('stand-by') or next(iter(status_entries.values()), None)
+        if fallback:
+            status_record = {"key": fallback['key'], "value": fallback['value'], "action": 'none'}
+        else:
+            status_record = {"key": 'stand-by', "value": 0, "action": 'none'}
+
+    cycles_value = get_simulated_cycles(mac)
+    status_value = int(status_record.get('value', 0)) & 0xFF
+    action_key = status_record.get('action') or 'none'
+    action_entries = actions_section
+    action_entry = None
+    if isinstance(action_entries, dict):
+        action_entry = action_entries.get(action_key) or action_entries.get('none')
+    action_value = 0
+    if action_entry and isinstance(action_entry, dict):
+        raw_action_value = extract_rep_value(action_entry)
+        if raw_action_value:
+            try:
+                action_value = int(raw_action_value, 16) & 0xFF
+            except ValueError:
+                action_value = 0
+
+    cycle_byte = cycles_value & 0xFF
+
+    labels = [
+        f"cycles:{cycle_byte}",
+        f"status:{format_label(status_record.get('key'))}",
+        f"action:{format_label(action_key)}",
+    ]
+
+    return {
+        "bytes": [cycles_header, cycle_byte, status_value, action_value],
+        "labels": labels,
+        "status_info": status_record,
+        "action_info": {
+            "key": action_key,
+            "value": action_value,
+        },
+        "cycle_info": {
+            "value": cycles_value,
+            "action_key": action_key,
+            "action_value": action_value,
+        },
+    }
+
+
 def discover_matches(robots: Iterable[Robot], messages_enabled: bool) -> List[Match]:
     robots_by_mac = {robot.mac: robot for robot in robots}
     matches: List[Match] = []
@@ -1077,6 +1234,22 @@ def listen_on_match(
                 controller_mac=remote_address,
             )
 
+        if payload_sequences is None and request_name in {'robot-cycles', 'robot-status-and-cycles'}:
+            cycle_frame = build_cycle_report(match.robot.type, match.robot.mac, available_messages, messages_enabled)
+            status_frame = None
+            if request_name == 'robot-status-and-cycles':
+                status_frame = build_status_response(match.robot.type, match.robot.mac, available_messages)
+            payload_sequences = []
+            sequence_labels = []
+            if cycle_frame:
+                payload_sequences.append(cycle_frame)
+                sequence_labels.append('cycle-report')
+            if status_frame:
+                payload_sequences.append(status_frame)
+                sequence_labels.append('status')
+            if not payload_sequences:
+                payload_sequences = []
+
         if highlight_remote and response_delay > 0:
             if stop_event.wait(response_delay):
                 return
@@ -1144,12 +1317,21 @@ def listen_on_match(
                     payload_sequences.append({"bytes": [value], "labels": [response_name or f"0x{response_code}"]})
 
         if request_name == 'request-all-data':
+            cycle_frame = build_cycle_report(match.robot.type, match.robot.mac, available_messages, messages_enabled)
             status_frame = build_status_response(match.robot.type, match.robot.mac, available_messages)
-            if status_frame:
-                if payload_sequences:
+            if status_frame or cycle_frame:
+                if not payload_sequences:
+                    payload_sequences = []
+                if cycle_frame:
+                    payload_sequences.insert(0, cycle_frame)
+                if status_frame:
                     payload_sequences.insert(0, status_frame)
-                else:
-                    payload_sequences = [status_frame]
+
+        mac_upper = match.robot.mac.upper()
+        if request_name in DISPLACEMENT_ACTIONS:
+            previous_displacement_action[mac_upper] = request_name.lower()
+
+        is_displacement_response = request_name in DISPLACEMENT_ACTIONS
 
         if not payload_sequences:
             if messages_enabled:
@@ -1175,8 +1357,10 @@ def listen_on_match(
                 if isinstance(labels, list):
                     labels_list = [str(label) for label in labels]
             status_info = None
+            action_info = None
             if isinstance(sequence_entry, dict):
                 status_info = sequence_entry.get("status_info")
+                action_info = sequence_entry.get("action_info")
             try:
                 if not target_remote:
                     raise RuntimeError("No remote device available for response")
@@ -1200,6 +1384,23 @@ def listen_on_match(
                         status_info.get("value"),
                         sequence_entry.get("action_info", {}).get("key") if isinstance(sequence_entry, dict) else None,
                     )
+                if (
+                    is_displacement_response
+                    and action_info
+                    and isinstance(action_info, dict)
+                ):
+                    action_key = str(action_info.get("key") or "").lower()
+                    if action_key == "cycle-end":
+                        last_action = previous_displacement_action.get(mac_upper)
+                        if last_action in CYCLE_INCREMENT_EXCLUDED_ACTIONS:
+                            if messages_enabled:
+                                logging.debug(
+                                    "[%s] Skipping cycle increment due to previous action %s",
+                                    match.robot.id,
+                                    last_action,
+                                )
+                        else:
+                            increment_simulated_cycles(match.robot, messages_enabled)
             except TimeoutException:
                 if messages_enabled:
                     logging.warning("[%s] Timeout sending %s", match.robot.id, sequence)
@@ -1236,6 +1437,23 @@ def listen_on_match(
                             status_info.get("value"),
                             sequence_entry.get("action_info", {}).get("key") if isinstance(sequence_entry, dict) else None,
                         )
+                    if (
+                        is_displacement_response
+                        and action_info
+                        and isinstance(action_info, dict)
+                    ):
+                        action_key = str(action_info.get("key") or "").lower()
+                        if action_key == "cycle-end":
+                            last_action = previous_displacement_action.get(mac_upper)
+                            if last_action in CYCLE_INCREMENT_EXCLUDED_ACTIONS:
+                                if messages_enabled:
+                                    logging.debug(
+                                        "[%s] Skipping cycle increment due to previous action %s",
+                                        match.robot.id,
+                                        last_action,
+                                    )
+                            else:
+                                increment_simulated_cycles(match.robot, messages_enabled)
                 except Exception as broadcast_exc:
                     if messages_enabled:
                         logging.error("[%s] Broadcast fallback failed: %s", match.robot.id, broadcast_exc)

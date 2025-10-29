@@ -4,7 +4,7 @@
       "setting-zero",
       "self-cleaning",
       "cleaning-routine",
-      "cleaning-finished"
+      "cycle-end"
     ],
     "stop": [],
     "to-start": [

@@ -1,5 +1,5 @@
 {
-  "updatedAt": "2025-10-17T03:18:01.059291+00:00",
+  "updatedAt": "2025-10-29T05:11:36.933208+00:00",
   "robots": [
     {
       "scadaId": "1",
@@ -9,7 +9,8 @@
       "type": "SST",
       "cycles": 3,
       "schedule": "",
-      "control-mac": "0013A20041A14995"
+      "control-mac": "0013A20041A14995",
+      "simulated-robot-cycles": 86
     },
     {
       "scadaId": "2",
@@ -19,7 +20,8 @@
       "type": "SMD",
       "cycles": 4,
       "schedule": "",
-      "control-mac": "0013A20041A14995"
+      "control-mac": "0013A20041A14995",
+      "simulated-robot-cycles": 210
     }
   ]
 }
