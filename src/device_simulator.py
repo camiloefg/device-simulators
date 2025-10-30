@@ -798,48 +798,62 @@ def build_displacement_frames(
     action_keys: Optional[Sequence[str]],
     available_messages: Dict[str, Dict[str, Dict[str, str]]],
 ) -> List[Dict[str, Any]]:
+    """
+    Build displacement frames based ONLY on the sequence defined in response_sequences.json.
+    No hardcoded behavior - the sequence file is the single source of truth.
+
+    Special handling:
+    - If action_key is "stand-by" → uses Stand By status + None action
+    - All other action_keys → uses Working status + the specified action
+    """
     _, actions_section, statuses_section, data_section = get_rep_sections(available_messages, robot_type)
     actions_header_hex, action_entries = parse_action_section(actions_section, data_section)
     statuses_header_hex, status_entries = parse_status_section(statuses_section, data_section)
 
-    if actions_header_hex is None or not action_entries or 'none' not in action_entries:
+    if actions_header_hex is None or not action_entries:
         return []
-    if 'working' not in status_entries or 'stand-by' not in status_entries:
+    if not status_entries:
         return []
 
     actions_header = actions_header_hex
-    working_entry = status_entries['working']
-    stand_by_entry = status_entries['stand-by']
-    none_entry = action_entries['none']
+    working_entry = status_entries.get('working')
+    stand_by_entry = status_entries.get('stand-by')
+    none_entry = action_entries.get('none')
 
     frames: List[Dict[str, Any]] = []
     sequence_iterable = list(action_keys or [])
 
     for step in sequence_iterable:
-        action_entry = action_entries.get(step)
-        if not action_entry:
-            continue
-        frames.append({
-            "bytes": [actions_header, working_entry['value'], action_entry['value']],
-            "labels": [
-                f"actions:{format_label(step)}",
-                f"status:{format_label('working')}",
-            ],
-            "status_info": {"key": 'working', "value": working_entry['value']},
-            "action_info": {"key": step, "value": action_entry['value']},
-            "action_label": format_label(step),
-        })
-
-    frames.append({
-        "bytes": [actions_header, stand_by_entry['value'], none_entry['value']],
-        "labels": [
-            f"actions:{format_label('none')}",
-            f"status:{format_label('stand-by')}",
-        ],
-        "status_info": {"key": 'stand-by', "value": stand_by_entry['value']},
-        "action_info": {"key": 'none', "value": none_entry['value']},
-        "action_label": format_label('none'),
-    })
+        # Special case: "stand-by" is not an action, it's a status
+        # Use Stand By status + None action
+        if step.lower() == 'stand-by':
+            if not stand_by_entry or not none_entry:
+                continue
+            frames.append({
+                "bytes": [actions_header, stand_by_entry['value'], none_entry['value']],
+                "labels": [
+                    f"actions:{format_label('none')}",
+                    f"status:{format_label('stand-by')}",
+                ],
+                "status_info": {"key": 'stand-by', "value": stand_by_entry['value']},
+                "action_info": {"key": 'none', "value": none_entry['value']},
+                "action_label": format_label('stand-by'),
+            })
+        else:
+            # Regular action: use Working status + specified action
+            action_entry = action_entries.get(step)
+            if not action_entry or not working_entry:
+                continue
+            frames.append({
+                "bytes": [actions_header, working_entry['value'], action_entry['value']],
+                "labels": [
+                    f"actions:{format_label(step)}",
+                    f"status:{format_label('working')}",
+                ],
+                "status_info": {"key": 'working', "value": working_entry['value']},
+                "action_info": {"key": step, "value": action_entry['value']},
+                "action_label": format_label(step),
+            })
 
     return frames
 

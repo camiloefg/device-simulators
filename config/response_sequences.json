@@ -1,12 +1,17 @@
 {
   "SST": {
     "play": [
-      "setting-zero",
+      "to-start",
       "self-cleaning",
       "cleaning-routine",
-      "cycle-end"
+      "half-cycle",
+      "cleaning-routine",
+      "cycle-end",
+      "stand-by"
     ],
-    "stop": [],
+    "stop": [
+      "stand-by"
+    ],
     "to-start": [
       "setting-zero"
     ],
@@ -23,7 +28,7 @@
       "jog-movement-dir2-brush-off"
     ],
     "jog-stop": [
-      "jog-stop"
+      "stand-by"
     ]
   },
   "SMD": {
@@ -31,28 +36,36 @@
       "moving-forward",
       "half-cycle",
       "moving-backward",
-      "cycle-end"
+      "cycle-end",
+      "stand-by"
     ],
     "play-reverse": [
       "moving-forward",
       "half-cycle",
       "moving-backward",
-      "cycle-end"
+      "cycle-end",
+      "stand-by"
     ],
     "forward-no-brush": [
       "moving-forward",
       "half-cycle",
-      "moving-backward"
+      "moving-backward",
+      "stand-by"
     ],
     "back": [
-      "moving-backward"
+      "moving-backward",
+      "stand-by"
     ],
     "back-reverse": [
-      "moving-backward"
+      "moving-backward",
+      "stand-by"
     ],
     "backward-no-brush": [
-      "moving-backward"
+      "moving-backward",
+      "stand-by"
     ],
-    "stop": []
+    "stop": [
+      "stand-by"
+    ]
   }
 }
