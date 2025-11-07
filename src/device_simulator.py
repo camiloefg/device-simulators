@@ -33,6 +33,7 @@ GREEN = "\033[92m"
 PINK = "\033[95m"
 BLUE = "\033[94m"
 PURPLE = "\033[35m"
+TURQUOISE = "\033[96m"
 RESET = "\033[0m"
 BAUD_RATE = 9600
 SYNC_TIMEOUT = 1.0
@@ -56,11 +57,24 @@ DISPLACEMENT_ACTIONS = {
     "backward-no-brush",
     "move-cw-no-brush",
     "move-ccw-no-brush",
+    "move-to-(45)",
+    "move-to-(-45)",
+    "move-to-(90)",
+    "move-to-(-90)",
+    "jog-dir1-brush-on",
+    "jog-dir2-brush-on",
+    "jog-dir1-brush-off",
+    "jog-dir2-brush-off",
+    "jog-stop",
 }
 CYCLE_INCREMENT_EXCLUDED_ACTIONS = {
     "to-start",
     "back",
     "back-reverse",
+    "move-to-(45)",
+    "move-to-(-45)",
+    "move-to-(90)",
+    "move-to-(-90)",
 }
 BROADCAST_ADDRESS = "000000000000FFFF"
 remote_write_registry: Dict[str, Dict[str, Any]] = {}
@@ -294,11 +308,30 @@ def _generate_status_telemetry(
     irradiance_w_m2 = max(0.0, getattr(irradiance_reading, 'irradiance_w_m2', 0.0))
     irradiance_word = _clamp_uint32(int(round(irradiance_w_m2 * 100)))
 
+    # Pyranometer 1 data
     pyr_temperature_c = _gauss(25.0, 5.0)
     pyr_temperature_word = _clamp_int16(int(round(pyr_temperature_c * 100))) & 0xFFFF
 
     pyr_voltage_v = _gauss(5.0, 0.25, minimum=0.0)
     pyr_voltage_word = _clamp_uint16(int(round(pyr_voltage_v * 100)))
+
+    # Pyranometer 2 data
+    irradiance2_reading = None
+    if solar_simulator is not None:
+        try:
+            irradiance2_reading = solar_simulator.compute()
+        except Exception:
+            irradiance2_reading = solar_simulator.last_reading
+    irradiance2_w_m2 = max(0.0, getattr(irradiance2_reading, 'irradiance_w_m2', 0.0))
+    # Add slight variation for second pyranometer
+    irradiance2_w_m2 = max(0.0, irradiance2_w_m2 + _gauss(0.0, 5.0))
+    irradiance2_word = _clamp_uint32(int(round(irradiance2_w_m2 * 100)))
+
+    pyr2_temperature_c = _gauss(25.0, 5.0)
+    pyr2_temperature_word = _clamp_int16(int(round(pyr2_temperature_c * 100))) & 0xFFFF
+
+    pyr2_voltage_v = _gauss(5.0, 0.25, minimum=0.0)
+    pyr2_voltage_word = _clamp_uint16(int(round(pyr2_voltage_v * 100)))
 
     telemetry_bytes: List[int] = []
     telemetry_bytes.extend(_split_uint16(angle_word))
@@ -308,9 +341,14 @@ def _generate_status_telemetry(
     telemetry_bytes.extend(_split_uint16(brush1_word))
     telemetry_bytes.extend(_split_uint16(brush2_word))
     telemetry_bytes.extend(_split_uint32(cycles_word))
+    # Pyranometer 1 data
     telemetry_bytes.extend(_split_uint32(irradiance_word))
     telemetry_bytes.extend(_split_uint16(pyr_temperature_word))
     telemetry_bytes.extend(_split_uint16(pyr_voltage_word))
+    # Pyranometer 2 data
+    telemetry_bytes.extend(_split_uint32(irradiance2_word))
+    telemetry_bytes.extend(_split_uint16(pyr2_temperature_word))
+    telemetry_bytes.extend(_split_uint16(pyr2_voltage_word))
 
     telemetry_info = {
         "angle_deg": round(angle_deg, 2),
@@ -323,6 +361,9 @@ def _generate_status_telemetry(
         "irradiance_w_m2": round(irradiance_w_m2, 2),
         "pyr_temperature_c": round(pyr_temperature_c, 2),
         "pyr_voltage_v": round(pyr_voltage_v, 2),
+        "irradiance2_w_m2": round(irradiance2_w_m2, 2),
+        "pyr2_temperature_c": round(pyr2_temperature_c, 2),
+        "pyr2_voltage_v": round(pyr2_voltage_v, 2),
     }
 
     return telemetry_bytes, telemetry_info
@@ -961,6 +1002,13 @@ def build_displacement_frames(
     actions_header = actions_header_hex
     working_entry = status_entries.get('working')
     stand_by_entry = status_entries.get('stand-by')
+    jog_entry = None
+    for key, entry in status_entries.items():
+        if key == 'value':
+            continue
+        if key.lower() == 'jog':
+            jog_entry = entry
+            break
     none_entry = action_entries.get('none')
 
     frames: List[Dict[str, Any]] = []
@@ -983,17 +1031,28 @@ def build_displacement_frames(
                 "action_label": format_label('stand-by'),
             })
         else:
-            # Regular action: use Working status + specified action
+            # Regular action: use Working status by default
             action_entry = action_entries.get(step)
-            if not action_entry or not working_entry:
+            if not action_entry:
                 continue
+
+            action_key_lower = step.lower()
+            status_entry = None
+            if action_key_lower.startswith('jog') and jog_entry:
+                status_entry = jog_entry
+            else:
+                status_entry = working_entry
+
+            if not status_entry:
+                continue
+
             frames.append({
-                "bytes": [actions_header, working_entry['value'], action_entry['value']],
+                "bytes": [actions_header, status_entry['value'], action_entry['value']],
                 "labels": [
                     f"actions:{format_label(step)}",
-                    f"status:{format_label('working')}",
+                    f"status:{format_label(status_entry['key'])}",
                 ],
-                "status_info": {"key": 'working', "value": working_entry['value']},
+                "status_info": {"key": status_entry['key'], "value": status_entry['value']},
                 "action_info": {"key": step, "value": action_entry['value']},
                 "action_label": format_label(step),
             })
@@ -1376,8 +1435,10 @@ def listen_on_match(
                 f" from {remote_address or 'unknown'}{RESET}"
             )
         elif request_name in DISPLACEMENT_ACTIONS:
+            is_jog_request = request_name.lower().startswith("jog-")
+            color = TURQUOISE if is_jog_request else BLUE
             print(
-                f"{BLUE}[Displacement] RX {frame_hex}"
+                f"{color}[Displacement] RX {frame_hex}"
                 f" from {remote_address or 'unknown'} → {request_name}{RESET}"
             )
 
@@ -1454,8 +1515,13 @@ def listen_on_match(
                 ]
                 if displacement_enabled and sequence_labels:
                     step_delay = max(displacement_interval, 0.0)
+                    label_is_jog = any(
+                        isinstance(label, str) and label.lower().startswith("jog")
+                        for label in sequence_labels
+                    )
+                    color = TURQUOISE if label_is_jog else BLUE
                     print(
-                        f"{BLUE}[Displacement] TX sequence {sequence_labels}"
+                        f"{color}[Displacement] TX sequence {sequence_labels}"
                         f" to {remote_address or 'unknown'} (interval {step_delay:.2f}s){RESET}"
                     )
                 elif not displacement_enabled:
@@ -1463,8 +1529,13 @@ def listen_on_match(
                     sequence_labels = sequence_labels[:1] if sequence_labels else None
                     step_delay = 0.0
                     if sequence_labels:
+                        label_is_jog = any(
+                            isinstance(label, str) and label.lower().startswith("jog")
+                            for label in sequence_labels
+                        )
+                        color = TURQUOISE if label_is_jog else BLUE
                         print(
-                            f"{BLUE}[Displacement] TX single response {sequence_labels}"
+                            f"{color}[Displacement] TX single response {sequence_labels}"
                             f" to {remote_address or 'unknown'} (simulation disabled){RESET}"
                         )
             else:
@@ -1551,16 +1622,21 @@ def listen_on_match(
                         response_name = translate_response(response_code, match.robot.type, available_messages)
                         labels_list.append(response_name or f"0x{response_code}")
                 tx_records.append(f"{' '.join(codes)} ({', '.join(labels_list)})")
+                action_key = (action_info.get("key") if isinstance(action_info, dict) else None) or ""
+                is_jog_action = isinstance(action_key, str) and action_key.lower().startswith("jog")
+                color = TURQUOISE if is_jog_action else PURPLE
                 print(
-                    f"{PURPLE}[TX] frame {' '.join(codes)} → {remote_address or 'unknown'} ({', '.join(labels_list)}){RESET}"
+                    f"{color}[TX] frame {' '.join(codes)} → {remote_address or 'unknown'} ({', '.join(labels_list)}){RESET}"
                 )
                 if status_info and isinstance(status_info, dict):
-                    update_displacement_status(
-                        match.robot.mac,
-                        status_info.get("key"),
-                        status_info.get("value"),
-                        sequence_entry.get("action_info", {}).get("key") if isinstance(sequence_entry, dict) else None,
-                    )
+                    status_key = (status_info.get("key") or "").lower()
+                    if status_key != "jog":
+                        update_displacement_status(
+                            match.robot.mac,
+                            status_info.get("key"),
+                            status_info.get("value"),
+                            sequence_entry.get("action_info", {}).get("key") if isinstance(sequence_entry, dict) else None,
+                        )
                 if (
                     is_displacement_response
                     and action_info
@@ -1609,16 +1685,21 @@ def listen_on_match(
                             response_name = translate_response(response_code, match.robot.type, available_messages)
                             labels_list.append(response_name or f"0x{response_code}")
                     tx_records.append(f"broadcast {' '.join(codes)} ({', '.join(labels_list)})")
+                    action_key = (action_info.get("key") if isinstance(action_info, dict) else None) or ""
+                    is_jog_action = isinstance(action_key, str) and action_key.lower().startswith("jog")
+                    color = TURQUOISE if is_jog_action else PURPLE
                     print(
-                        f"{PURPLE}[TX] broadcast {' '.join(codes)} → {remote_address or 'unknown'} ({', '.join(labels_list)}){RESET}"
+                        f"{color}[TX] broadcast {' '.join(codes)} → {remote_address or 'unknown'} ({', '.join(labels_list)}){RESET}"
                     )
                     if status_info and isinstance(status_info, dict):
-                        update_displacement_status(
-                            match.robot.mac,
-                            status_info.get("key"),
-                            status_info.get("value"),
-                            sequence_entry.get("action_info", {}).get("key") if isinstance(sequence_entry, dict) else None,
-                        )
+                        status_key = (status_info.get("key") or "").lower()
+                        if status_key != "jog":
+                            update_displacement_status(
+                                match.robot.mac,
+                                status_info.get("key"),
+                                status_info.get("value"),
+                                sequence_entry.get("action_info", {}).get("key") if isinstance(sequence_entry, dict) else None,
+                            )
                     if (
                         is_displacement_response
                         and action_info

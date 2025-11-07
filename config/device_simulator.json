@@ -13,6 +13,6 @@
   },
   "displacementSimulation": {
     "enabled": true,
-    "timeIntervalMs": 2000
+    "timeIntervalMs": 3000
   }
 }

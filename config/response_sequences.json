@@ -1,10 +1,9 @@
 {
   "SST": {
     "play": [
-      "to-start",
+      "setting-zero",
       "self-cleaning",
       "cleaning-routine",
-      "half-cycle",
       "cleaning-routine",
       "cycle-end",
       "stand-by"
@@ -16,18 +15,34 @@
       "setting-zero"
     ],
     "jog-dir1-brush-on": [
-      "jog-movement-dir1-brush-on"
+      "jog-dir1-b:-on"
     ],
     "jog-dir2-brush-on": [
-      "jog-movement-dir2-brush-on"
+      "jog-dir2-b:-on"
     ],
     "jog-dir1-brush-off": [
-      "jog-movement-dir1-brush-off"
+      "jog-dir1-b:-off"
     ],
     "jog-dir2-brush-off": [
-      "jog-movement-dir2-brush-off"
+      "jog-dir2-b:-off"
     ],
     "jog-stop": [
+      "jog-stop"
+    ],
+    "move-to-(45)": [
+      "moving-to-(45)",
+      "stand-by"
+    ],
+    "move-to-(-45)": [
+      "moving-to-(-45)",
+      "stand-by"
+    ],
+    "move-to-(90)": [
+      "moving-to-(90)",
+      "stand-by"
+    ],
+    "move-to-(-90)": [
+      "moving-to-(-90)",
       "stand-by"
     ]
   },
