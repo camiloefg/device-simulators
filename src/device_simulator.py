@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import random
 import signal
 import threading
 import time
@@ -210,6 +211,148 @@ def load_available_messages(project_root: Path, config: Dict[str, Any]) -> Dict[
 latest_displacement_status: Dict[str, Dict[str, Any]] = {}
 simulated_cycles_registry: Dict[str, int] = {}
 previous_displacement_action: Dict[str, str] = {}
+
+
+def _gauss(mean: float, std_dev: float, minimum: Optional[float] = None, maximum: Optional[float] = None) -> float:
+    value = random.gauss(mean, std_dev)
+    if minimum is not None:
+        value = max(minimum, value)
+    if maximum is not None:
+        value = min(maximum, value)
+    return value
+
+
+def _clamp_uint16(value: int) -> int:
+    return max(0, min(0xFFFF, value))
+
+
+def _clamp_int16(value: int) -> int:
+    return max(-0x8000, min(0x7FFF, value))
+
+
+def _clamp_uint32(value: int) -> int:
+    return max(0, min(0xFFFFFFFF, value))
+
+
+def _split_uint16(value: int) -> List[int]:
+    safe_value = value & 0xFFFF
+    return [safe_value & 0xFF, (safe_value >> 8) & 0xFF]
+
+
+def _split_uint32(value: int) -> List[int]:
+    safe_value = value & 0xFFFFFFFF
+    return [
+        safe_value & 0xFF,
+        (safe_value >> 8) & 0xFF,
+        (safe_value >> 16) & 0xFF,
+        (safe_value >> 24) & 0xFF,
+    ]
+
+
+def _generate_status_telemetry(
+    mac: str,
+    status_record: Dict[str, Any],
+    solar_simulator: Optional[SolarIrradianceSimulator],
+) -> Tuple[List[int], Dict[str, Any]]:
+    status_key = str(status_record.get('key') or '').lower()
+    is_working = status_key == 'working'
+
+    angle_deg = _gauss(45.0, 5.0, minimum=0.0, maximum=180.0)
+    angle_word = _clamp_uint16(int(round(angle_deg * 100)))
+
+    voltage_v = _gauss(24.0, 0.25, minimum=0.0)
+    voltage_word = _clamp_uint16(int(round(voltage_v * 100)))
+
+    if is_working:
+        total_current = _gauss(2.20, 0.55, minimum=0.0)
+        gearbox_current = _gauss(1.5, 0.55, minimum=0.0)
+        brush_mean = 0.35
+        brush_std = 0.55
+    else:
+        total_current = _gauss(0.42, 0.01, minimum=0.0)
+        gearbox_current = _gauss(0.0, 0.15, minimum=0.0)
+        brush_mean = 0.0
+        brush_std = 0.15
+
+    brush1_current = _gauss(brush_mean, brush_std, minimum=0.0)
+    brush2_current = _gauss(brush_mean, brush_std, minimum=0.0)
+
+    total_current_word = _clamp_int16(int(round(total_current * 100))) & 0xFFFF
+    gearbox_word = _clamp_int16(int(round(gearbox_current * 100))) & 0xFFFF
+    brush1_word = _clamp_int16(int(round(brush1_current * 100))) & 0xFFFF
+    brush2_word = _clamp_int16(int(round(brush2_current * 100))) & 0xFFFF
+
+    cycles_value = get_simulated_cycles(mac)
+    cycles_word = _clamp_uint32(cycles_value)
+
+    irradiance_reading = None
+    if solar_simulator is not None:
+        try:
+            irradiance_reading = solar_simulator.compute()
+        except Exception:
+            irradiance_reading = solar_simulator.last_reading
+    irradiance_w_m2 = max(0.0, getattr(irradiance_reading, 'irradiance_w_m2', 0.0))
+    irradiance_word = _clamp_uint32(int(round(irradiance_w_m2 * 100)))
+
+    pyr_temperature_c = _gauss(25.0, 5.0)
+    pyr_temperature_word = _clamp_int16(int(round(pyr_temperature_c * 100))) & 0xFFFF
+
+    pyr_voltage_v = _gauss(5.0, 0.25, minimum=0.0)
+    pyr_voltage_word = _clamp_uint16(int(round(pyr_voltage_v * 100)))
+
+    telemetry_bytes: List[int] = []
+    telemetry_bytes.extend(_split_uint16(angle_word))
+    telemetry_bytes.extend(_split_uint16(voltage_word))
+    telemetry_bytes.extend(_split_uint16(total_current_word))
+    telemetry_bytes.extend(_split_uint16(gearbox_word))
+    telemetry_bytes.extend(_split_uint16(brush1_word))
+    telemetry_bytes.extend(_split_uint16(brush2_word))
+    telemetry_bytes.extend(_split_uint32(cycles_word))
+    telemetry_bytes.extend(_split_uint32(irradiance_word))
+    telemetry_bytes.extend(_split_uint16(pyr_temperature_word))
+    telemetry_bytes.extend(_split_uint16(pyr_voltage_word))
+
+    telemetry_info = {
+        "angle_deg": round(angle_deg, 2),
+        "voltage_v": round(voltage_v, 2),
+        "total_current_a": round(total_current, 2),
+        "gearbox_current_a": round(gearbox_current, 2),
+        "brush1_current_a": round(brush1_current, 2),
+        "brush2_current_a": round(brush2_current, 2),
+        "cycles": cycles_value,
+        "irradiance_w_m2": round(irradiance_w_m2, 2),
+        "pyr_temperature_c": round(pyr_temperature_c, 2),
+        "pyr_voltage_v": round(pyr_voltage_v, 2),
+    }
+
+    return telemetry_bytes, telemetry_info
+
+
+def _format_telemetry_summary(telemetry: Optional[Dict[str, Any]]) -> str:
+    if not isinstance(telemetry, dict) or not telemetry:
+        return ""
+    labels = [
+        ("angle_deg", "angle"),
+        ("voltage_v", "voltage"),
+        ("total_current_a", "total"),
+        ("gearbox_current_a", "gearbox"),
+        ("brush1_current_a", "brush1"),
+        ("brush2_current_a", "brush2"),
+        ("cycles", "cycles"),
+        ("irradiance_w_m2", "irradiance"),
+        ("pyr_temperature_c", "pyr_temp"),
+        ("pyr_voltage_v", "pyr_voltage"),
+    ]
+    parts: List[str] = []
+    for key, label in labels:
+        value = telemetry.get(key)
+        if value is None:
+            continue
+        if isinstance(value, float):
+            parts.append(f"{label}={value:.2f}")
+        else:
+            parts.append(f"{label}={value}")
+    return ", ".join(parts)
 
 
 def update_displacement_status(mac: str, status_key: Optional[str], status_value: Optional[int], action_key: Optional[str] = None) -> None:
@@ -862,6 +1005,7 @@ def build_status_response(
     robot_type: str,
     mac: str,
     available_messages: Dict[str, Dict[str, Dict[str, str]]],
+    solar_simulator: Optional[SolarIrradianceSimulator] = None,
 ) -> Optional[Dict[str, Any]]:
     _, actions_section, statuses_section, data_section = get_rep_sections(available_messages, robot_type)
     status_header_hex, status_entries = parse_status_section(statuses_section, data_section)
@@ -893,6 +1037,14 @@ def build_status_response(
     action_label = format_label(normalised_action_key)
 
     payload_bytes = [status_header_hex, value, action_value]
+
+    telemetry_info: Dict[str, Any] = {}
+    if robot_type and robot_type.upper() == "SST":
+        try:
+            telemetry_bytes, telemetry_info = _generate_status_telemetry(mac, record, solar_simulator)
+            payload_bytes.extend(telemetry_bytes)
+        except Exception:
+            telemetry_info = {}
     return {
         "bytes": payload_bytes,
         "labels": [
@@ -904,6 +1056,7 @@ def build_status_response(
             "key": normalised_action_key,
             "value": action_value,
         },
+        "telemetry_info": telemetry_info,
         "action_label": action_label,
     }
 
@@ -958,13 +1111,13 @@ def build_cycle_report(
     cycle_byte3 = (cycles_value >> 24) & 0xFF  # MSB (most significant byte)
 
     labels = [
-        f"cycles:{cycles_value}",
         f"status:{format_label(status_record.get('key'))}",
         f"action:{format_label(action_key)}",
+        f"cycles:{cycles_value}",
     ]
 
     return {
-        "bytes": [cycles_header, cycle_byte0, cycle_byte1, cycle_byte2, cycle_byte3, status_value, action_value],
+        "bytes": [cycles_header, status_value, action_value, cycle_byte0, cycle_byte1, cycle_byte2, cycle_byte3],
         "labels": labels,
         "status_info": status_record,
         "action_info": {
@@ -1177,6 +1330,7 @@ def listen_on_match(
     sequences: Dict[str, Dict[str, Sequence[str]]],
     available_messages: Dict[str, Dict[str, Dict[str, str]]],
     messages_enabled: bool,
+    solar_simulator: Optional[SolarIrradianceSimulator],
     displacement_simulation: Optional[Dict[str, Any]],
 ) -> None:
     device = XBeeDevice(match.port, BAUD_RATE)
@@ -1255,7 +1409,7 @@ def listen_on_match(
 
         # Handle request-all-data: respond with status frame containing all data (0x3A)
         if payload_sequences is None and request_name == 'request-all-data':
-            status_frame = build_status_response(match.robot.type, match.robot.mac, available_messages)
+            status_frame = build_status_response(match.robot.type, match.robot.mac, available_messages, solar_simulator)
             payload_sequences = []
             sequence_labels = []
             if status_frame:
@@ -1267,7 +1421,7 @@ def listen_on_match(
             cycle_frame = build_cycle_report(match.robot.type, match.robot.mac, available_messages, messages_enabled)
             status_frame = None
             if request_name == 'robot-status-and-cycles':
-                status_frame = build_status_response(match.robot.type, match.robot.mac, available_messages)
+                status_frame = build_status_response(match.robot.type, match.robot.mac, available_messages, solar_simulator)
             payload_sequences = []
             sequence_labels = []
             if cycle_frame:
@@ -1384,6 +1538,11 @@ def listen_on_match(
                     raise RuntimeError("No remote device available for response")
                 if SEND_TIMEOUT and SEND_TIMEOUT > 0:
                     device.set_sync_ops_timeout(SEND_TIMEOUT)
+                telemetry_summary = _format_telemetry_summary(
+                    sequence_entry.get("telemetry_info") if isinstance(sequence_entry, dict) else None
+                )
+                if telemetry_summary and messages_enabled:
+                    logging.info("[%s] Telemetry → %s", match.robot.id, telemetry_summary)
                 device.send_data(target_remote, bytes(sequence))
                 codes = [format(value, "02X") for value in sequence]
                 if not labels_list:
@@ -1437,6 +1596,11 @@ def listen_on_match(
                 try:
                     if SEND_TIMEOUT and SEND_TIMEOUT > 0:
                         device.set_sync_ops_timeout(SEND_TIMEOUT)
+                    telemetry_summary = _format_telemetry_summary(
+                        sequence_entry.get("telemetry_info") if isinstance(sequence_entry, dict) else None
+                    )
+                    if telemetry_summary and messages_enabled:
+                        logging.info("[%s] Telemetry → %s", match.robot.id, telemetry_summary)
                     device.send_data_broadcast(bytes(sequence))
                     codes = [format(value, "02X") for value in sequence]
                     if not labels_list:
@@ -1664,6 +1828,7 @@ def main() -> None:
                 sequences,
                 available_messages,
                 messages_enabled,
+                solar_simulator,
                 displacement_simulation,
             ),
             daemon=True,
