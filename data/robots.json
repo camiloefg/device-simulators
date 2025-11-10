@@ -1,27 +1,60 @@
 {
-  "updatedAt": "2025-11-07T19:28:29.237759+00:00",
+  "updatedAt": "2025-11-10T02:27:02.111823+00:00",
   "robots": [
     {
       "scadaId": "1",
-      "id": "SSLOC1",
-      "mac": "0013A20041A14AA2",
+      "id": "R00001",
+      "mac": "0013A200426C102D",
       "description": "Sunsight location 1",
       "type": "SST",
-      "cycles": 3,
+      "cycles": 0,
       "schedule": "",
-      "control-mac": "0013A20041A14995",
-      "simulated-robot-cycles": 143
+      "control-mac": "0013A200426C0F64",
+      "simulated-robot-cycles": 0
     },
     {
       "scadaId": "2",
-      "id": "SSLOC2",
-      "mac": "0013A20041A14A93",
+      "id": "R00002",
+      "mac": "0013A200426C0FEB",
+      "description": "Sunsight location 2",
+      "type": "SST",
+      "cycles": 0,
+      "schedule": "",
+      "control-mac": "0013A200426C0F64",
+      "simulated-robot-cycles": 0
+    },
+    {
+      "scadaId": "3",
+      "id": "R00003",
+      "mac": "0013A200426C1025",
       "description": "SmartDuster location 1",
       "type": "SMD",
-      "cycles": 4,
+      "cycles": 0,
       "schedule": "",
-      "control-mac": "0013A20041A14995",
-      "simulated-robot-cycles": 444
+      "control-mac": "0013A200426C0F64",
+      "simulated-robot-cycles": 0
+    },
+    {
+      "scadaId": "4",
+      "id": "R00004",
+      "mac": "0013A200426C0F33",
+      "description": "SmartDuster location 2",
+      "type": "SMD",
+      "cycles": 0,
+      "schedule": "",
+      "control-mac": "0013A200426C0F64",
+      "simulated-robot-cycles": 0
+    },
+    {
+      "scadaId": "5",
+      "id": "R00005",
+      "mac": "0013A200426C0F8B",
+      "description": "Sunsight location 3",
+      "type": "SST",
+      "cycles": 0,
+      "schedule": "",
+      "control-mac": "0013A200426C0F64",
+      "simulated-robot-cycles": 0
     }
   ]
 }

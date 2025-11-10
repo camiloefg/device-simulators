@@ -305,7 +305,10 @@ def _generate_status_telemetry(
             irradiance_reading = solar_simulator.compute()
         except Exception:
             irradiance_reading = solar_simulator.last_reading
+
     irradiance_w_m2 = max(0.0, getattr(irradiance_reading, 'irradiance_w_m2', 0.0))
+    # Add small stochastic variation so values don't stick at zero when light is low
+    irradiance_w_m2 = max(0.0, irradiance_w_m2 + _gauss(0.0, 5.0))
     irradiance_word = _clamp_uint32(int(round(irradiance_w_m2 * 100)))
 
     # Pyranometer 1 data
