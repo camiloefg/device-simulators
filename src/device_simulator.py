@@ -67,6 +67,19 @@ DISPLACEMENT_ACTIONS = {
     "jog-dir2-brush-off",
     "jog-stop",
 }
+INFORMATION_REQUESTS = {
+    "battery",
+    "total-current",
+    "encoder",
+    "gearbox-current",
+    "brush1-current",
+    "brush2-current",
+    "robot-staus",
+    "robot-cycles",
+    "robot-status-and-cycles",
+    "robot-pyr-readings",
+    "request-all-data",
+}
 CYCLE_INCREMENT_EXCLUDED_ACTIONS = {
     "to-start",
     "back",
@@ -79,6 +92,9 @@ CYCLE_INCREMENT_EXCLUDED_ACTIONS = {
 BROADCAST_ADDRESS = "000000000000FFFF"
 remote_write_registry: Dict[str, Dict[str, Any]] = {}
 ROBOTS_FILE_PATH: Optional[Path] = None
+ROBOTS_FILE_MTIME: Optional[float] = None
+ROBOTS_CACHE_BY_MAC: Dict[str, Dict[str, Any]] = {}
+LOW_BATTERY_REGISTRY: Dict[str, bool] = {}
 
 
 class MessageLoggingFilter(logging.Filter):
@@ -118,6 +134,7 @@ class Robot:
     type: str
     description: str
     scada_id: str
+    low_battery: bool = False
     simulated_cycles: int = 0
 
     @classmethod
@@ -128,6 +145,7 @@ class Robot:
             type=payload["type"].upper(),
             description=payload.get("description", ""),
             scada_id=payload.get("scadaId", ""),
+            low_battery=_coerce_bool(payload.get("low-battery") or payload.get("lowBattery"), False),
             simulated_cycles=_parse_simulated_cycles(
                 payload.get("simulated-robot-cycles")
                 or payload.get("simulatedRobotCycles")
@@ -414,12 +432,20 @@ def get_displacement_status(mac: str) -> Optional[Dict[str, Any]]:
 
 
 def initialise_status_for_robot(robot: Robot, available_messages: Dict[str, Any]) -> None:
-    rep_robot = get_response_root(available_messages, robot.type)
-    statuses_section = rep_robot.get("statuses", {})
-    stand_by_entry = statuses_section.get("stand-by")
-    value = extract_rep_value(stand_by_entry)
-    if value is not None:
-        update_displacement_status(robot.mac, "stand-by", int(value, 16), "none")
+    _, actions_section, statuses_section, data_section = get_rep_sections(available_messages, robot.type)
+    _, status_entries = parse_status_section(statuses_section, data_section)
+    _, action_entries = parse_action_section(actions_section, data_section)
+
+    low_battery_active = getattr(robot, "low_battery", False)
+    target_status_key = "error" if low_battery_active else "stand-by"
+    status_entry = status_entries.get(target_status_key) or next(iter(status_entries.values()), None)
+
+    target_action_key = "low-battery" if low_battery_active else "none"
+    action_entry = action_entries.get(target_action_key) if isinstance(action_entries, dict) else None
+    action_key = target_action_key if action_entry is None else action_entry.get("key", target_action_key)
+
+    if status_entry and "value" in status_entry:
+        update_displacement_status(robot.mac, status_entry.get("key"), status_entry.get("value"), action_key)
 
 
 def initialise_robot_statuses(robots: Iterable[Robot], available_messages: Dict[str, Any]) -> None:
@@ -596,6 +622,11 @@ def load_robots(project_root: Path) -> List[Robot]:
     path = resolve_existing_path(candidates)
     global ROBOTS_FILE_PATH
     ROBOTS_FILE_PATH = path
+    try:
+        global ROBOTS_FILE_MTIME
+        ROBOTS_FILE_MTIME = path.stat().st_mtime
+    except OSError:
+        ROBOTS_FILE_MTIME = None
     with path.open("r", encoding="utf-8") as fh:
         contents = json.load(fh)
     robots_payload = contents.get("robots", [])
@@ -605,6 +636,8 @@ def load_robots(project_root: Path) -> List[Robot]:
             robot = Robot.from_dict(payload)
             robots.append(robot)
             simulated_cycles_registry[robot.mac] = robot.simulated_cycles
+            LOW_BATTERY_REGISTRY[robot.mac.upper()] = bool(robot.low_battery)
+            ROBOTS_CACHE_BY_MAC[robot.mac.upper()] = payload
         except KeyError as exc:
             logging.warning("Skipping robot entry missing key %s: %s", exc, payload)
     return robots
@@ -654,6 +687,72 @@ def persist_control_mac(robot_mac: str, controller_mac: str, messages_enabled: b
 
 def get_simulated_cycles(mac: str) -> int:
     return simulated_cycles_registry.get(mac.upper(), 0)
+
+
+def _set_robot_status_action(
+    robot: Robot,
+    available_messages: Dict[str, Any],
+    status_key: str,
+    action_key: str,
+) -> None:
+    _, actions_section, statuses_section, data_section = get_rep_sections(available_messages, robot.type)
+    _, status_entries = parse_status_section(statuses_section, data_section)
+    _, action_entries = parse_action_section(actions_section, data_section)
+    status_entry = status_entries.get(status_key)
+    action_entry = action_entries.get(action_key) if isinstance(action_entries, dict) else None
+    if status_entry and "value" in status_entry and action_entry and "value" in action_entry:
+        update_displacement_status(robot.mac, status_entry.get("key"), status_entry.get("value"), action_entry.get("key"))
+
+
+def _refresh_robot_flags_from_file(
+    available_messages: Dict[str, Any],
+    robot: Robot,
+) -> None:
+    """
+    Reload the robots.json file when it changes on disk so toggling flags like
+    low-battery is picked up without restarting the simulator.
+    """
+    if not ROBOTS_FILE_PATH or not ROBOTS_FILE_PATH.is_file():
+        return
+    global ROBOTS_FILE_MTIME, ROBOTS_CACHE_BY_MAC
+    try:
+        mtime = ROBOTS_FILE_PATH.stat().st_mtime
+    except OSError:
+        return
+    cache_stale = ROBOTS_FILE_MTIME is None or mtime > ROBOTS_FILE_MTIME
+    if cache_stale:
+        try:
+            with ROBOTS_FILE_PATH.open("r", encoding="utf-8") as fh:
+                payload = json.load(fh)
+        except Exception:
+            return
+        robots_payload = payload.get("robots")
+        if not isinstance(robots_payload, list):
+            return
+        ROBOTS_CACHE_BY_MAC = {}
+        for entry in robots_payload:
+            mac = entry.get("mac")
+            if isinstance(mac, str):
+                ROBOTS_CACHE_BY_MAC[mac.upper()] = entry
+        ROBOTS_FILE_MTIME = mtime
+
+    mac_upper = robot.mac.upper()
+    entry = ROBOTS_CACHE_BY_MAC.get(mac_upper)
+    if not entry:
+        return
+    new_low_battery = _coerce_bool(entry.get("low-battery") or entry.get("lowBattery"), False)
+    prev_low_battery = LOW_BATTERY_REGISTRY.get(mac_upper)
+    if prev_low_battery is not None and prev_low_battery == new_low_battery:
+        return
+
+    robot.low_battery = new_low_battery
+    LOW_BATTERY_REGISTRY[mac_upper] = new_low_battery
+
+    # Adjust in-memory status to match toggled flag for immediate effect
+    if new_low_battery:
+        _set_robot_status_action(robot, available_messages, "error", "low-battery")
+    else:
+        _set_robot_status_action(robot, available_messages, "stand-by", "none")
 
 
 def persist_simulated_cycles(robot_mac: str, cycles: int, messages_enabled: bool) -> None:
@@ -1063,6 +1162,63 @@ def build_displacement_frames(
     return frames
 
 
+def build_low_battery_response(
+    robot: Robot,
+    available_messages: Dict[str, Dict[str, Dict[str, str]]],
+    solar_simulator: Optional[SolarIrradianceSimulator],
+    prefer_action_header: bool = False,
+) -> Optional[Dict[str, Any]]:
+    """
+    Build a single response frame indicating the robot is in a low-battery error state.
+
+    If action headers are requested but unavailable, this falls back to the standard
+    data response identifier (typically 0x3A) to ensure the controller is informed.
+    """
+    _, actions_section, statuses_section, data_section = get_rep_sections(available_messages, robot.type)
+    status_header_hex, status_entries = parse_status_section(statuses_section, data_section)
+    action_header_hex, action_entries = parse_action_section(actions_section, data_section)
+
+    error_entry = status_entries.get("error")
+    low_battery_entry = action_entries.get("low-battery") if isinstance(action_entries, dict) else None
+
+    header = action_header_hex if prefer_action_header and action_header_hex is not None else status_header_hex
+
+    if header is None or not error_entry or not low_battery_entry:
+        return None
+
+    payload_bytes = [header, error_entry["value"], low_battery_entry["value"]]
+    action_label = format_label(low_battery_entry.get("key"))
+
+    telemetry_info: Dict[str, Any] = {}
+    if status_header_hex is not None and header == status_header_hex and robot.type.upper() == "SST":
+        try:
+            telemetry_bytes, telemetry_info = _generate_status_telemetry(
+                robot.mac,
+                {"key": error_entry.get("key"), "value": error_entry.get("value"), "action": low_battery_entry.get("key")},
+                solar_simulator,
+            )
+            payload_bytes.extend(telemetry_bytes)
+        except Exception:
+            telemetry_info = {}
+
+    update_displacement_status(robot.mac, error_entry.get("key"), error_entry.get("value"), low_battery_entry.get("key"))
+
+    return {
+        "bytes": payload_bytes,
+        "labels": [
+            f"status:{format_label(error_entry.get('key'))}",
+            f"action:{action_label}",
+        ],
+        "status_info": {"key": error_entry.get("key"), "value": error_entry.get("value")},
+        "action_info": {
+            "key": low_battery_entry.get("key"),
+            "value": low_battery_entry.get("value"),
+        },
+        "telemetry_info": telemetry_info,
+        "action_label": action_label,
+    }
+
+
 def build_status_response(
     robot_type: str,
     mac: str,
@@ -1432,6 +1588,8 @@ def listen_on_match(
         request_code = format(raw[0], "02X")
         request_name = translate_request(request_code, match.robot.type, request_lookup)
         label = request_name or f"unknown:{request_code}"
+        _refresh_robot_flags_from_file(available_messages, match.robot)
+        low_battery_active = getattr(match.robot, "low_battery", False)
         if request_name == WRITE_ACTION_KEY:
             print(
                 f"{PINK}[Remote Find] RX {frame_hex}"
@@ -1462,6 +1620,22 @@ def listen_on_match(
         payload_sequences: Optional[List[Dict[str, Any]]] = None
         sequence_labels: Optional[List[str]] = None
         sequence_keys = sequences.get(match.robot.type.upper(), {}).get(request_code.upper())
+
+        if low_battery_active and request_name != WRITE_ACTION_KEY:
+            prefers_action_header = request_name in DISPLACEMENT_ACTIONS
+            low_battery_frame = build_low_battery_response(
+                match.robot,
+                available_messages,
+                solar_simulator,
+                prefer_action_header=prefers_action_header,
+            )
+            if low_battery_frame and (
+                request_name in DISPLACEMENT_ACTIONS
+                or request_name in INFORMATION_REQUESTS
+                or request_name is None
+            ):
+                payload_sequences = [low_battery_frame]
+                sequence_labels = ["low-battery"]
 
         if request_name == WRITE_ACTION_KEY:
             payload_sequences = build_mac_write_ack(
@@ -1564,14 +1738,44 @@ def listen_on_match(
                         )
                     if request_name != 'request-all-data':
                         return
-                for value in base_payload:
-                    response_code = format(value, "02X")
-                    response_name = translate_response(response_code, match.robot.type, available_messages)
-                    if response_name:
-                        sequence_labels.append(response_name)
-                    else:
-                        sequence_labels.append(f"0x{response_code}")
-                    payload_sequences.append({"bytes": [value], "labels": [response_name or f"0x{response_code}"]})
+                    for value in base_payload:
+                        response_code = format(value, "02X")
+                        response_name = translate_response(response_code, match.robot.type, available_messages)
+                        if response_name:
+                            sequence_labels.append(response_name)
+                        else:
+                            sequence_labels.append(f"0x{response_code}")
+                        payload_sequences.append({"bytes": [value], "labels": [response_name or f"0x{response_code}"]})
+
+        if (
+            low_battery_active
+            and request_name != WRITE_ACTION_KEY
+            and payload_sequences
+            and (
+                request_name in DISPLACEMENT_ACTIONS
+                or request_name in INFORMATION_REQUESTS
+                or request_name is None
+            )
+        ):
+            def _is_low_battery(entry: Any) -> bool:
+                if not isinstance(entry, dict):
+                    return False
+                status_info = entry.get("status_info") if isinstance(entry.get("status_info"), dict) else {}
+                action_info = entry.get("action_info") if isinstance(entry.get("action_info"), dict) else {}
+                status_key = str(status_info.get("key") or "").lower()
+                action_key = str(action_info.get("key") or "").lower()
+                return status_key == "error" and action_key == "low-battery"
+
+            if not any(_is_low_battery(entry) for entry in payload_sequences):
+                fallback_frame = build_low_battery_response(
+                    match.robot,
+                    available_messages,
+                    solar_simulator,
+                    prefer_action_header=request_name in DISPLACEMENT_ACTIONS,
+                )
+                if fallback_frame:
+                    payload_sequences = [fallback_frame]
+                    sequence_labels = ["low-battery"]
 
         mac_upper = match.robot.mac.upper()
         if request_name in DISPLACEMENT_ACTIONS:
