@@ -431,6 +431,15 @@ def get_displacement_status(mac: str) -> Optional[Dict[str, Any]]:
     return latest_displacement_status.get(mac)
 
 
+def get_standby_status_value(robot_type: str, available_messages: Dict[str, Any]) -> Optional[int]:
+    _, _, statuses_section, data_section = get_rep_sections(available_messages, robot_type)
+    _, status_entries = parse_status_section(statuses_section, data_section)
+    stand_by_entry = status_entries.get("stand-by") if isinstance(status_entries, dict) else None
+    if stand_by_entry and "value" in stand_by_entry:
+        return stand_by_entry["value"]
+    return None
+
+
 def initialise_status_for_robot(robot: Robot, available_messages: Dict[str, Any]) -> None:
     _, actions_section, statuses_section, data_section = get_rep_sections(available_messages, robot.type)
     _, status_entries = parse_status_section(statuses_section, data_section)
@@ -1844,23 +1853,31 @@ def listen_on_match(
                             status_info.get("value"),
                             sequence_entry.get("action_info", {}).get("key") if isinstance(sequence_entry, dict) else None,
                         )
-                if (
-                    is_displacement_response
-                    and action_info
-                    and isinstance(action_info, dict)
-                ):
-                    action_key = str(action_info.get("key") or "").lower()
-                    if action_key == "cycle-end":
-                        last_action = previous_displacement_action.get(mac_upper)
-                        if last_action in CYCLE_INCREMENT_EXCLUDED_ACTIONS:
-                            if messages_enabled:
-                                logging.debug(
-                                    "[%s] Skipping cycle increment due to previous action %s",
-                                    match.robot.id,
-                                    last_action,
+                    if (
+                        is_displacement_response
+                        and action_info
+                        and isinstance(action_info, dict)
+                    ):
+                        action_key = str(action_info.get("key") or "").lower()
+                        if action_key == "cycle-end":
+                            last_action = previous_displacement_action.get(mac_upper)
+                            if last_action in CYCLE_INCREMENT_EXCLUDED_ACTIONS:
+                                if messages_enabled:
+                                    logging.debug(
+                                        "[%s] Skipping cycle increment due to previous action %s",
+                                        match.robot.id,
+                                        last_action,
+                                    )
+                            else:
+                                increment_simulated_cycles(match.robot, messages_enabled)
+                            stand_by_value = get_standby_status_value(match.robot.type, available_messages)
+                            if stand_by_value is not None:
+                                update_displacement_status(
+                                    match.robot.mac,
+                                    "stand-by",
+                                    stand_by_value,
+                                    "none",
                                 )
-                        else:
-                            increment_simulated_cycles(match.robot, messages_enabled)
             except TimeoutException:
                 if messages_enabled:
                     logging.warning("[%s] Timeout sending %s", match.robot.id, sequence)
@@ -1924,6 +1941,14 @@ def listen_on_match(
                                     )
                             else:
                                 increment_simulated_cycles(match.robot, messages_enabled)
+                            stand_by_value = get_standby_status_value(match.robot.type, available_messages)
+                            if stand_by_value is not None:
+                                update_displacement_status(
+                                    match.robot.mac,
+                                    "stand-by",
+                                    stand_by_value,
+                                    "none",
+                                )
                 except Exception as broadcast_exc:
                     if messages_enabled:
                         logging.error("[%s] Broadcast fallback failed: %s", match.robot.id, broadcast_exc)

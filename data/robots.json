@@ -1,5 +1,5 @@
 {
-  "updatedAt": "2025-11-25T14:12:09.907410+00:00",
+  "updatedAt": "2025-12-01T22:24:09.401604+00:00",
   "robots": [
     {
       "scadaId": "1",
@@ -23,7 +23,7 @@
       "schedule": "",
       "control-mac": "0013A200426C0F64",
       "simulated-robot-cycles": 11,
-      "low-battery": true
+      "low-battery": false
     },
     {
       "scadaId": "3",
@@ -34,7 +34,7 @@
       "cycles": 0,
       "schedule": "",
       "control-mac": "0013A200426C0F64",
-      "simulated-robot-cycles": 46,
+      "simulated-robot-cycles": 70,
       "low-battery": false
     },
     {
@@ -46,7 +46,7 @@
       "cycles": 0,
       "schedule": "",
       "control-mac": "0013A200426C0F64",
-      "simulated-robot-cycles": 6,
+      "simulated-robot-cycles": 17,
       "low-battery": false
     },
     {
