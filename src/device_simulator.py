@@ -268,16 +268,17 @@ def _clamp_uint32(value: int) -> int:
 
 def _split_uint16(value: int) -> List[int]:
     safe_value = value & 0xFFFF
-    return [safe_value & 0xFF, (safe_value >> 8) & 0xFF]
+    # Big-endian ordering to match on-wire encoding
+    return [(safe_value >> 8) & 0xFF, safe_value & 0xFF]
 
 
 def _split_uint32(value: int) -> List[int]:
     safe_value = value & 0xFFFFFFFF
     return [
-        safe_value & 0xFF,
-        (safe_value >> 8) & 0xFF,
-        (safe_value >> 16) & 0xFF,
         (safe_value >> 24) & 0xFF,
+        (safe_value >> 16) & 0xFF,
+        (safe_value >> 8) & 0xFF,
+        safe_value & 0xFF,
     ]
 
 
@@ -290,10 +291,10 @@ def _generate_status_telemetry(
     is_working = status_key == 'working'
 
     angle_deg = _gauss(45.0, 5.0, minimum=0.0, maximum=180.0)
-    angle_word = _clamp_uint16(int(round(angle_deg * 100)))
+    angle_word = _clamp_int16(int(round(angle_deg * 100))) & 0xFFFF
 
     voltage_v = _gauss(24.0, 0.25, minimum=0.0)
-    voltage_word = _clamp_uint16(int(round(voltage_v * 100)))
+    voltage_word = _clamp_int16(int(round(voltage_v * 100))) & 0xFFFF
 
     if is_working:
         total_current = _gauss(2.20, 0.55, minimum=0.0)
@@ -334,7 +335,7 @@ def _generate_status_telemetry(
     pyr_temperature_word = _clamp_int16(int(round(pyr_temperature_c * 100))) & 0xFFFF
 
     pyr_voltage_v = _gauss(5.0, 0.25, minimum=0.0)
-    pyr_voltage_word = _clamp_uint16(int(round(pyr_voltage_v * 100)))
+    pyr_voltage_word = _clamp_int16(int(round(pyr_voltage_v * 100))) & 0xFFFF
 
     # Pyranometer 2 data
     irradiance2_reading = None
@@ -352,7 +353,7 @@ def _generate_status_telemetry(
     pyr2_temperature_word = _clamp_int16(int(round(pyr2_temperature_c * 100))) & 0xFFFF
 
     pyr2_voltage_v = _gauss(5.0, 0.25, minimum=0.0)
-    pyr2_voltage_word = _clamp_uint16(int(round(pyr2_voltage_v * 100)))
+    pyr2_voltage_word = _clamp_int16(int(round(pyr2_voltage_v * 100))) & 0xFFFF
 
     telemetry_bytes: List[int] = []
     telemetry_bytes.extend(_split_uint16(angle_word))
