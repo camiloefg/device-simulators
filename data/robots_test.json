@@ -1,0 +1,27 @@
+{
+  "updatedAt": "2025-11-07T19:28:29.237759+00:00",
+  "robots": [
+    {
+      "scadaId": "1",
+      "id": "SSLOC1",
+      "mac": "0013A20041A14AA2",
+      "description": "Sunsight location 1",
+      "type": "SST",
+      "cycles": 3,
+      "schedule": "",
+      "control-mac": "0013A20041A14995",
+      "simulated-robot-cycles": 143
+    },
+    {
+      "scadaId": "2",
+      "id": "SSLOC2",
+      "mac": "0013A20041A14A93",
+      "description": "SmartDuster location 1",
+      "type": "SMD",
+      "cycles": 4,
+      "schedule": "",
+      "control-mac": "0013A20041A14995",
+      "simulated-robot-cycles": 444
+    }
+  ]
+}
