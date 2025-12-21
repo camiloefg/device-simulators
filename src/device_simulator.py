@@ -391,6 +391,62 @@ def _generate_status_telemetry(
     return telemetry_bytes, telemetry_info
 
 
+def _generate_smd_status_telemetry(
+    mac: str,
+    status_record: Dict[str, Any],
+) -> Tuple[List[int], Dict[str, Any]]:
+    status_key = str(status_record.get('key') or '').lower()
+    is_working = status_key == 'working'
+
+    voltage_v = _gauss(24.0, 0.25, minimum=0.0)
+    charging_voltage_v = max(voltage_v, _gauss(26.5, 0.35, minimum=0.0))
+
+    if is_working:
+        motor_high_mean = 2.2
+        motor_low_mean = 1.8
+        temp_base = 35.0
+    else:
+        motor_high_mean = 0.35
+        motor_low_mean = 0.25
+        temp_base = 27.5
+
+    motor22_current = _gauss(motor_high_mean, 0.35, minimum=0.0)
+    motor21_current = _gauss(motor_low_mean, 0.30, minimum=0.0)
+    motor12_current = _gauss(motor_high_mean, 0.35, minimum=0.0)
+    motor11_current = _gauss(motor_low_mean, 0.30, minimum=0.0)
+
+    motor2_drivers_temp_c = _gauss(temp_base, 3.0)
+    motor1_drivers_temp_c = _gauss(temp_base - 0.5, 3.0)
+
+    cycles_value = get_simulated_cycles(mac)
+    cycles_word = _clamp_uint32(cycles_value)
+
+    telemetry_bytes: List[int] = []
+    telemetry_bytes.extend(_split_uint16(_clamp_int16(int(round(voltage_v * 100))) & 0xFFFF))
+    telemetry_bytes.extend(_split_uint16(_clamp_int16(int(round(charging_voltage_v * 100))) & 0xFFFF))
+    telemetry_bytes.extend(_split_uint16(_clamp_int16(int(round(motor22_current * 100))) & 0xFFFF))
+    telemetry_bytes.extend(_split_uint16(_clamp_int16(int(round(motor21_current * 100))) & 0xFFFF))
+    telemetry_bytes.extend(_split_uint16(_clamp_int16(int(round(motor12_current * 100))) & 0xFFFF))
+    telemetry_bytes.extend(_split_uint16(_clamp_int16(int(round(motor11_current * 100))) & 0xFFFF))
+    telemetry_bytes.extend(_split_uint16(_clamp_int16(int(round(motor2_drivers_temp_c * 100))) & 0xFFFF))
+    telemetry_bytes.extend(_split_uint16(_clamp_int16(int(round(motor1_drivers_temp_c * 100))) & 0xFFFF))
+    telemetry_bytes.extend(_split_uint32(cycles_word))
+
+    telemetry_info = {
+        "voltage_v": round(voltage_v, 2),
+        "charging_voltage_v": round(charging_voltage_v, 2),
+        "motor22_current_a": round(motor22_current, 2),
+        "motor21_current_a": round(motor21_current, 2),
+        "motor12_current_a": round(motor12_current, 2),
+        "motor11_current_a": round(motor11_current, 2),
+        "motor2_drivers_temp_c": round(motor2_drivers_temp_c, 2),
+        "motor1_drivers_temp_c": round(motor1_drivers_temp_c, 2),
+        "cycles": cycles_value,
+    }
+
+    return telemetry_bytes, telemetry_info
+
+
 def _format_telemetry_summary(telemetry: Optional[Dict[str, Any]]) -> str:
     if not isinstance(telemetry, dict) or not telemetry:
         return ""
@@ -405,6 +461,13 @@ def _format_telemetry_summary(telemetry: Optional[Dict[str, Any]]) -> str:
         ("irradiance_w_m2", "irradiance"),
         ("pyr_temperature_c", "pyr_temp"),
         ("pyr_voltage_v", "pyr_voltage"),
+        ("charging_voltage_v", "charging_voltage"),
+        ("motor22_current_a", "motor22"),
+        ("motor21_current_a", "motor21"),
+        ("motor12_current_a", "motor12"),
+        ("motor11_current_a", "motor11"),
+        ("motor2_drivers_temp_c", "drv2_temp"),
+        ("motor1_drivers_temp_c", "drv1_temp"),
     ]
     parts: List[str] = []
     for key, label in labels:
@@ -1267,12 +1330,16 @@ def build_status_response(
     payload_bytes = [status_header_hex, value, action_value]
 
     telemetry_info: Dict[str, Any] = {}
-    if robot_type and robot_type.upper() == "SST":
-        try:
+    try:
+        robot_type_upper = robot_type.upper() if isinstance(robot_type, str) else ""
+        if robot_type_upper == "SST":
             telemetry_bytes, telemetry_info = _generate_status_telemetry(mac, record, solar_simulator)
             payload_bytes.extend(telemetry_bytes)
-        except Exception:
-            telemetry_info = {}
+        elif robot_type_upper == "SMD":
+            telemetry_bytes, telemetry_info = _generate_smd_status_telemetry(mac, record)
+            payload_bytes.extend(telemetry_bytes)
+    except Exception:
+        telemetry_info = {}
     return {
         "bytes": payload_bytes,
         "labels": [
